@@ -31,6 +31,17 @@ jobs:
         run: |
           sed -i 's/android:label="[^"]*"/android:label="MRT CRM"/' android/app/src/main/AndroidManifest.xml
           grep -n 'android:label' android/app/src/main/AndroidManifest.xml
+      - name: Allow newer plugins (compile every module against Android 36)
+        run: |
+          mkdir -p ~/.gradle/init.d
+          cat > ~/.gradle/init.d/force-sdk.gradle <<'EOF'
+          gradle.beforeProject { p ->
+            p.afterEvaluate {
+              def a = p.extensions.findByName('android')
+              if (a != null) { a.compileSdkVersion(36) }
+            }
+          }
+          EOF
       - run: flutter pub get
       - run: flutter build apk --release
       - uses: actions/upload-artifact@v4
