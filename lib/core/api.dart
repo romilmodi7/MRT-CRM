@@ -35,14 +35,20 @@ class ApiRes {
 
   String get msg {
     final m = json['msg'];
-    if (m is String && m.isNotEmpty) return m;
+    if (m is String && m.isNotEmpty) {
+      return RegExp(r'/home/|/var/|/usr/|\.php|SQLSTATE|vendor/|storage/|Stack trace', caseSensitive: false).hasMatch(m) ? 'The server had a problem. Please try again in a moment.' : m;
+    }
     final e = json['errors'];
     if (e is Map && e.isNotEmpty) {
       final f = e.values.first;
       if (f is List && f.isNotEmpty) return f.first.toString();
     }
+    final er = json['error'];
+    if (er is String && er.isNotEmpty) return er == 'no_file' ? 'The file could not be read. Please try again.' : 'Could not complete this. Please try again.';
     final mm = json['message'];
-    if (mm is String && mm.isNotEmpty) return mm;
+    // a raw server error (file paths, SQL, exception names) must never be shown to the user
+    if (mm is String && mm.isNotEmpty && !RegExp(r'[\\/]|\.php|SQLSTATE|Exception|vendor|Stack trace|Call to|Undefined', caseSensitive: false).hasMatch(mm)) return mm;
+    if (code >= 500) return 'The server had a problem. Please try again in a moment.';
     return code == 0 ? 'No internet connection. Please try again.' : 'Something went wrong. Please try again.';
   }
 }
@@ -65,8 +71,16 @@ class Api {
   static Future<ApiRes> _run(Future<http.Response> Function() f, {int secs = 40}) async {
     try {
       final r = await f().timeout(Duration(seconds: secs));
-      final res = ApiRes.from(r);
-      if (res.code == 401 && !res.needCode && Session.token != null) onUnauthorized?.call();
+      var res = ApiRes.from(r);
+      if (res.code == 401 && !res.needCode && Session.token != null) {
+        // One "401" can be a server hiccup (the app was just resumed, a cache reset ...). Ask again twice before ever logging out,
+        // so a person who logged in once stays logged in.
+        for (var i = 0; i < 2 && res.code == 401; i++) {
+          await Future.delayed(Duration(seconds: 2));
+          res = ApiRes.from(await f().timeout(Duration(seconds: secs)));
+        }
+        if (res.code == 401 && Session.token != null) onUnauthorized?.call();
+      }
       return res;
     } catch (_) {
       return ApiRes.offline();
