@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'platform.dart';
 import 'theme.dart';
@@ -44,7 +45,8 @@ class AuthImage extends StatefulWidget {
   final double? width, height;
   final BoxFit fit;
   final BorderRadius radius;
-  const AuthImage({super.key, required this.cacheKey, required this.loader, this.width, this.height, this.fit = BoxFit.cover, this.radius = BorderRadius.zero});
+  final bool fullRes; // full-screen viewer: decode at the real size so zoom stays sharp
+  const AuthImage({super.key, required this.cacheKey, required this.loader, this.width, this.height, this.fit = BoxFit.cover, this.radius = BorderRadius.zero, this.fullRes = false});
   @override
   State<AuthImage> createState() => _AuthImageState();
 }
@@ -81,7 +83,7 @@ class _AuthImageState extends State<AuthImage> {
     Widget inner;
     if (_b != null) {
       inner = Image.memory(_b!, width: widget.width, height: widget.height, fit: widget.fit, gaplessPlayback: true,
-          cacheWidth: widget.width == null ? null : (widget.width! * MediaQuery.of(context).devicePixelRatio).round(),
+          cacheWidth: (widget.fullRes || widget.width == null) ? null : (widget.width! * MediaQuery.of(context).devicePixelRatio).round(),
           errorBuilder: (_, __, ___) => _box(Icon(Icons.broken_image_outlined, color: C.muted)));
     } else if (_failed) {
       inner = GestureDetector(
@@ -129,13 +131,16 @@ class _LinkTextState extends State<LinkText> {
   Widget build(BuildContext context) {
     _dispose();
     final spans = <InlineSpan>[];
+    // link colour follows the text colour: light text (on blue / dark bubbles) -> light cyan, dark text (white bubbles) -> strong blue
+    final lightText = (widget.style.color ?? C.text).computeLuminance() > .5;
+    final linkColor = lightText ? Color(0xFFBDF1FF) : Color(0xFF1D4ED8);
     var i = 0;
     for (final m in kUrlRe.allMatches(widget.text)) {
       if (m.start > i) spans.add(TextSpan(text: widget.text.substring(i, m.start)));
       final url = m.group(0)!;
       final rec = TapGestureRecognizer()..onTap = () => openLink(url);
       _r.add(rec);
-      spans.add(TextSpan(text: url, recognizer: rec, style: TextStyle(color: Color(0xFF9FE9FF), decoration: TextDecoration.underline)));
+      spans.add(TextSpan(text: url, recognizer: rec, style: TextStyle(color: linkColor, decoration: TextDecoration.underline, decorationColor: linkColor, fontWeight: FontWeight.w600)));
       i = m.end;
     }
     if (i < widget.text.length) spans.add(TextSpan(text: widget.text.substring(i)));
@@ -211,29 +216,103 @@ class EmptyState extends StatelessWidget {
 }
 
 /// Full-screen picture viewer: pinch to zoom, close with the X. No save / share anywhere.
-class ImageViewerPage extends StatelessWidget {
+/// Full-screen photo viewer: edge to edge, status bar hidden, pinch / double-tap zoom, swipe down to close.
+class ImageViewerPage extends StatefulWidget {
   final String cacheKey;
   final Future<Uint8List?> Function() loader;
   final String title;
   const ImageViewerPage({super.key, required this.cacheKey, required this.loader, this.title = ''});
+  @override
+  State<ImageViewerPage> createState() => _ImageViewerPageState();
+}
+
+class _ImageViewerPageState extends State<ImageViewerPage> with SingleTickerProviderStateMixin {
+  final _tc = TransformationController();
+  late final AnimationController _zoomAnim = AnimationController(vsync: this, duration: Duration(milliseconds: 220));
+  Animation<Matrix4>? _zoomTween;
+  Offset _dTap = Offset.zero;
+  double _dragY = 0;
+  bool _bars = true;
+
+  @override
+  void initState() {
+    super.initState();
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    _zoomAnim.addListener(() {
+      if (_zoomTween != null) _tc.value = _zoomTween!.value;
+    });
+  }
+
+  @override
+  void dispose() {
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    _zoomAnim.dispose();
+    _tc.dispose();
+    super.dispose();
+  }
+
+  bool get _zoomed => _tc.value.getMaxScaleOnAxis() > 1.02;
+
+  void _doubleTap() {
+    final end = _zoomed
+        ? Matrix4.identity()
+        : (Matrix4.identity()
+          ..translate(-_dTap.dx * 1.5, -_dTap.dy * 1.5)
+          ..scale(2.5));
+    _zoomTween = Matrix4Tween(begin: _tc.value, end: end).animate(CurvedAnimation(parent: _zoomAnim, curve: Curves.easeOut));
+    _zoomAnim.forward(from: 0);
+  }
 
   @override
   Widget build(BuildContext context) {
+    final size = MediaQuery.of(context).size;
+    final fade = (1 - (_dragY.abs() / 400)).clamp(0.25, 1.0);
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: Colors.black.withAlpha((255 * fade).round()),
       body: Stack(children: [
         Positioned.fill(
-          child: InteractiveViewer(
-            minScale: 1, maxScale: 6,
-            child: Center(child: AuthImage(cacheKey: cacheKey, loader: loader, fit: BoxFit.contain)),
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => setState(() => _bars = !_bars),
+            onDoubleTapDown: (d) => _dTap = d.localPosition,
+            onDoubleTap: _doubleTap,
+            onVerticalDragUpdate: (d) {
+              if (!_zoomed) setState(() => _dragY += d.delta.dy);
+            },
+            onVerticalDragEnd: (d) {
+              if (_dragY.abs() > 110 || (d.primaryVelocity ?? 0).abs() > 900) {
+                Navigator.pop(context);
+              } else {
+                setState(() => _dragY = 0);
+              }
+            },
+            child: Transform.translate(
+              offset: Offset(0, _dragY),
+              child: InteractiveViewer(
+                transformationController: _tc,
+                minScale: 1,
+                maxScale: 6,
+                clipBehavior: Clip.none,
+                child: SizedBox(
+                  width: size.width,
+                  height: size.height,
+                  child: Center(child: AuthImage(cacheKey: widget.cacheKey, loader: widget.loader, width: size.width, height: size.height, fit: BoxFit.contain, fullRes: true)),
+                ),
+              ),
+            ),
           ),
         ),
-        SafeArea(
-          child: Padding(
-            padding: EdgeInsets.all(8),
+        AnimatedPositioned(
+          duration: Duration(milliseconds: 180),
+          top: _bars ? 0 : -120,
+          left: 0,
+          right: 0,
+          child: Container(
+            padding: EdgeInsets.only(top: MediaQuery.of(context).padding.top + 4, left: 8, right: 16, bottom: 18),
+            decoration: BoxDecoration(gradient: LinearGradient(colors: [Color(0xCC000000), Color(0x00000000)], begin: Alignment.topCenter, end: Alignment.bottomCenter)),
             child: Row(children: [
-              IconButton(onPressed: () => Navigator.pop(context), icon: Icon(Icons.close_rounded, color: Colors.white, size: 28)),
-              Expanded(child: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: C.sub))),
+              IconButton(onPressed: () => Navigator.pop(context), icon: Icon(Icons.arrow_back_rounded, color: Colors.white, size: 28)),
+              Expanded(child: Text(widget.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w600, decoration: TextDecoration.none))),
             ]),
           ),
         ),
