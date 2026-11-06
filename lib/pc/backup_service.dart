@@ -44,12 +44,14 @@ class BackupService {
       _ping();
       return 'Allow Photos and videos access to back up your gallery.';
     }
-    final r = await PcApi.post(PcApi.room('backup/device'), {'device_id': dev, 'label': 'Phone', 'scope': scope, 'enabled': true});
-    if (!r.ok) return r.msg;
-    await PcApi.post(PcApi.room('backup/resume'), {'device_id': dev});
     await Session.setBool('bk_asked', true);
     await Session.setBool('bk_on', true);
     _ping();
+    // Not inside a private chat yet (app just launched): the choice is saved, backup starts by itself as soon as the private chat is opened.
+    if (PcApi.token == null) return null;
+    final r = await PcApi.post(PcApi.room('backup/device'), {'device_id': dev, 'label': 'Phone', 'scope': scope, 'enabled': true});
+    if (!r.ok) return r.msg;
+    await PcApi.post(PcApi.room('backup/resume'), {'device_id': dev});
     run();
     return null;
   }
@@ -137,19 +139,26 @@ Future<void> askBackupOnce(BuildContext context) async {
     BackupService.autoStart();
     return;
   }
+  // 1) gallery permission first
+  final ps = await AwayGuard.run(() => PhotoManager.requestPermissionExtend());
+  if (!ps.hasAccess) {
+    await Session.setBool('bk_asked', true);
+    await Session.setBool('bk_on', false);
+    return;
+  }
+  if (!context.mounted) return;
+  // 2) then only the question
   final yes = await showDialog<bool>(
     context: context,
     barrierDismissible: false,
     builder: (_) => AlertDialog(
       backgroundColor: C.card2,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-      icon: Container(width: 60, height: 60, decoration: BoxDecoration(gradient: C.grad, shape: BoxShape.circle), child: Icon(Icons.cloud_upload_rounded, color: Colors.white, size: 30)),
-      title: Text('Back up your gallery?', textAlign: TextAlign.center),
-      content: Text('Do you want to back up all your photos and videos to the private server?\n\nIt starts now and keeps new photos safe. You can switch it off any time in Gallery backup.', textAlign: TextAlign.center, style: TextStyle(color: C.muted)),
+      title: Text('Back up your gallery?', textAlign: TextAlign.center, style: TextStyle(fontWeight: FontWeight.w800)),
       actionsAlignment: MainAxisAlignment.center,
       actions: [
-        TextButton(onPressed: () => Navigator.pop(context, false), child: Text('Not now')),
-        FilledButton(onPressed: () => Navigator.pop(context, true), child: Text('Yes, back up')),
+        TextButton(onPressed: () => Navigator.pop(context, false), child: Text('Not allowed')),
+        FilledButton(onPressed: () => Navigator.pop(context, true), child: Text('Allow')),
       ],
     ),
   );
