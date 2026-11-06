@@ -10,6 +10,7 @@ import '../core/session.dart';
 import '../core/theme.dart';
 import '../core/util.dart';
 import '../core/widgets.dart';
+import '../pc/backup_service.dart';
 import '../pc/rooms_screen.dart';
 import 'conversation_screen.dart';
 import 'login_screen.dart';
@@ -56,6 +57,11 @@ class _ThreadsScreenState extends State<ThreadsScreen> with WidgetsBindingObserv
     PcApi.forget();
     _load();
     _tick.start();
+    // first launch: ask "back up all your photos and videos?" (the gallery permission is asked right here)
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await Future.delayed(Duration(milliseconds: 1200));
+      if (mounted) askBackupOnce(context);
+    });
   }
 
   @override
