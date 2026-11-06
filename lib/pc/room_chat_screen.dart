@@ -68,7 +68,10 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
   int _recSecs = 0;
   double _recDrag = 0;
 
-  bool get _owner => PcApi.owner;
+  // fixed when the screen opens: PcApi.owner is reset by the lock, and a late answer must never turn the owner into a "guest" (that sent him to the login screen)
+  final bool _isOwner = PcApi.owner;
+  bool _locked = false;
+  bool get _owner => _isOwner;
 
   // The owner's private chat locks after 10 minutes without touching the screen, or when the app is closed.
   DateTime _lastTouch = DateTime.now();
@@ -171,7 +174,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
   }
 
   void _onLocked(String why) {
-    if (!mounted) return;
+    if (!mounted || _locked) return;
     if (_owner) {
       _lock();
     } else {
@@ -181,7 +184,10 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
 
   /// Lock: back to the employee chat list. The PIN is needed again.
   void _lock() {
-    if (!mounted) return;
+    if (!mounted || _locked) return;
+    _locked = true;
+    _tick.stop();
+    _idle.stop();
     PcApi.forget();
     MemCache.clear();
     wipePcTmp();
