@@ -55,7 +55,7 @@ class _LocationScreenState extends State<LocationScreen> {
       return;
     }
     var p = await Geolocator.checkPermission();
-    if (p == LocationPermission.denied) p = await Geolocator.requestPermission();
+    if (p == LocationPermission.denied) p = await AwayGuard.run(() => Geolocator.requestPermission());
     if (p == LocationPermission.denied || p == LocationPermission.deniedForever) {
       if (mounted) toast(context, 'Location permission is needed.');
       return;

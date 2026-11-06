@@ -234,7 +234,7 @@ class PcBubble extends StatelessWidget {
             if (context.mounted) toast(context, 'Could not open the file.');
             return;
           }
-          await OpenFilex.open(f.path);
+          await AwayGuard.run(() => OpenFilex.open(f.path));
         },
         child: Container(
           padding: EdgeInsets.all(10),

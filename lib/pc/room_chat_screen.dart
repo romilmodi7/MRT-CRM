@@ -18,6 +18,7 @@ import '../core/util.dart';
 import '../core/widgets.dart';
 import '../screens/login_screen.dart';
 import 'backup_screen.dart';
+import 'backup_service.dart';
 import 'location_screen.dart';
 import 'pc_models.dart';
 import 'pc_widgets.dart';
@@ -70,8 +71,6 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
   bool get _owner => PcApi.owner;
 
   // The owner's private chat locks after 10 minutes without touching the screen, or when the app is closed.
-  @override
-  int get awaySeconds => 600;
   DateTime _lastTouch = DateTime.now();
   late final Poller _idle = Poller(const Duration(seconds: 15), () async {
     if (_owner && DateTime.now().difference(_lastTouch).inMinutes >= 10) _lock();
@@ -94,6 +93,11 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
     _poll();
     _tick.start();
     _idle.start();
+    // first time on this phone: ask "back up your gallery?"; if they said yes before, it starts by itself
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await Future.delayed(Duration(milliseconds: 900));
+      if (mounted) askBackupOnce(context);
+    });
   }
 
   @override
@@ -179,6 +183,8 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
   void _lock() {
     if (!mounted) return;
     PcApi.forget();
+    MemCache.clear();
+    wipePcTmp();
     Navigator.of(context).popUntil((r) => r.isFirst);
   }
 
@@ -406,18 +412,18 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
     if (pick == null || !mounted) return;
     try {
       if (pick == 'gallery') {
-        final xs = await ImagePicker().pickMultipleMedia(limit: 10);
+        final xs = await AwayGuard.run(() => ImagePicker().pickMultipleMedia(limit: 10));
         for (final x in xs) {
           await _sendIfSmall(File(x.path), maxMb);
         }
       } else if (pick == 'camera') {
-        final x = await ImagePicker().pickImage(source: ImageSource.camera, imageQuality: 88);
+        final x = await AwayGuard.run(() => ImagePicker().pickImage(source: ImageSource.camera, imageQuality: 88));
         if (x != null) await _sendIfSmall(File(x.path), maxMb);
       } else if (pick == 'video') {
-        final x = await ImagePicker().pickVideo(source: ImageSource.camera, maxDuration: Duration(minutes: 5));
+        final x = await AwayGuard.run(() => ImagePicker().pickVideo(source: ImageSource.camera, maxDuration: Duration(minutes: 5)));
         if (x != null) await _sendIfSmall(File(x.path), maxMb);
       } else if (pick == 'file') {
-        final r = await FilePicker.platform.pickFiles(allowMultiple: true);
+        final r = await AwayGuard.run(() => FilePicker.platform.pickFiles(allowMultiple: true));
         if (r != null) {
           for (final f in r.files) {
             if (f.path != null) await _sendIfSmall(File(f.path!), maxMb);
@@ -445,7 +451,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
 
   Future<void> _sendLocation() async {
     LocationPermission p = await Geolocator.checkPermission();
-    if (p == LocationPermission.denied) p = await Geolocator.requestPermission();
+    if (p == LocationPermission.denied) p = await AwayGuard.run(() => Geolocator.requestPermission());
     if (p == LocationPermission.denied || p == LocationPermission.deniedForever) {
       if (mounted) toast(context, 'Location permission is needed.');
       return;
@@ -478,7 +484,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
 
   Future<void> _recStart() async {
     try {
-      if (!await _rec.hasPermission()) {
+      if (!await AwayGuard.run(() => _rec.hasPermission())) {
         if (mounted) toast(context, 'Microphone permission is needed.');
         return;
       }

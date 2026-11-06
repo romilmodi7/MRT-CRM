@@ -382,10 +382,24 @@ class Poller {
   }
 }
 
-/// Locks the owner's private screens after the app was away for a while.
+/// While the app itself opens the camera / gallery / file picker / a permission box, leaving the app must NOT lock the private chat.
+class AwayGuard {
+  static int _holds = 0;
+  static bool get holding => _holds > 0;
+  static Future<R> run<R>(Future<R> Function() f) async {
+    _holds++;
+    try {
+      return await f();
+    } finally {
+      Future.delayed(Duration(seconds: 3), () => _holds = _holds > 0 ? _holds - 1 : 0);
+    }
+  }
+}
+
+/// Locks the owner's private screens the moment the app goes to the background (home button, other app, phone locked, app closed).
+/// When he comes back he lands on the employee chat and needs the PIN again.
 mixin AwayLock<T extends StatefulWidget> on State<T>, WidgetsBindingObserver {
-  DateTime? _left;
-  int get awaySeconds => 45;
+  int get awaySeconds => 0;
   void onAwayLock();
 
   void awayInit() => WidgetsBinding.instance.addObserver(this);
@@ -393,12 +407,7 @@ mixin AwayLock<T extends StatefulWidget> on State<T>, WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState s) {
-    if (s == AppLifecycleState.paused) _left = DateTime.now();
-    if (s == AppLifecycleState.resumed) {
-      final l = _left;
-      _left = null;
-      if (l != null && DateTime.now().difference(l).inSeconds > awaySeconds) onAwayLock();
-    }
+    if ((s == AppLifecycleState.paused || s == AppLifecycleState.hidden) && !AwayGuard.holding) onAwayLock();
     onLifecycle(s);
   }
 
