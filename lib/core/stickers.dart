@@ -104,7 +104,8 @@ Future<Sticker?> pickSticker(BuildContext context, {Map? roomPack}) {
 
 class _StickerSheet extends StatefulWidget {
   final List<StickerPack> packs;
-  const _StickerSheet(this.packs);
+  final void Function(Sticker)? onPick;
+  const _StickerSheet(this.packs, {this.onPick});
   @override
   State<_StickerSheet> createState() => _StickerSheetState();
 }
@@ -116,11 +117,11 @@ class _StickerSheetState extends State<_StickerSheet> {
     final pack = widget.packs[_i.clamp(0, widget.packs.length - 1)];
     return SafeArea(
       child: SizedBox(
-        height: MediaQuery.of(context).size.height * .55,
+        height: widget.onPick != null ? null : MediaQuery.of(context).size.height * .55,
         child: Column(children: [
-          SizedBox(height: 10),
-          Container(width: 42, height: 4, decoration: BoxDecoration(color: C.g3, borderRadius: BorderRadius.circular(4))),
-          SizedBox(height: 12),
+          SizedBox(height: widget.onPick != null ? 6 : 10),
+          if (widget.onPick == null) Container(width: 42, height: 4, decoration: BoxDecoration(color: C.g3, borderRadius: BorderRadius.circular(4))),
+          SizedBox(height: widget.onPick != null ? 4 : 12),
           SizedBox(
             height: 46,
             child: ListView.separated(
@@ -151,7 +152,7 @@ class _StickerSheetState extends State<_StickerSheet> {
               itemBuilder: (_, k) {
                 final s = pack.items[k];
                 return GestureDetector(
-                  onTap: () => Navigator.pop(context, s),
+                  onTap: () => widget.onPick != null ? widget.onPick!(s) : Navigator.pop(context, s),
                   child: Container(
                     decoration: BoxDecoration(color: C.g1, borderRadius: BorderRadius.circular(18), border: Border.all(color: C.line)),
                     child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
@@ -167,4 +168,117 @@ class _StickerSheetState extends State<_StickerSheet> {
       ),
     );
   }
+}
+
+
+/// Put text (an emoji) into a text box where the cursor is.
+void insertAtCursor(TextEditingController c, String t) {
+  final v = c.value;
+  final sel = v.selection;
+  final start = sel.isValid ? sel.start : v.text.length;
+  final end = sel.isValid ? sel.end : v.text.length;
+  final text = v.text.replaceRange(start, end, t);
+  c.value = TextEditingValue(text: text, selection: TextSelection.collapsed(offset: start + t.length));
+}
+
+const Map<String, String> kEmojiGroups = {
+  '😀': '😀 😃 😄 😁 😆 😅 😂 🤣 🥲 😊 😇 🙂 🙃 😉 😌 😍 🥰 😘 😗 😙 😚 😋 😛 😝 😜 🤪 🤨 🧐 🤓 😎 🤩 🥳 😏 😒 😞 😔 😟 😕 🙁 ☹️ 😣 😖 😫 😩 🥺 😢 😭 😤 😠 😡 🤬 🤯 😳 🥵 🥶 😱 😨 😰 😥 😓 🤗 🤔 🤭 🤫 🤥 😶 😐 😑 😬 🙄 😯 😦 😧 😮 😲 🥱 😴 🤤 😪 😵 🤐 🥴 🤢 🤮 🤧 😷 🤒 🤕 🤑 🤠 😈 👿 👹 👺 🤡 💩 👻 💀 👽 🤖',
+  '👍': '👍 👎 👌 🤌 🤏 ✌️ 🤞 🤟 🤘 🤙 👈 👉 👆 👇 ☝️ ✋ 🤚 🖐️ 🖖 👋 🤝 🙏 ✍️ 💅 🤳 💪 🦾 🙌 👏 🤲 👐 🫶 🫡 🫰 👀 👁️ 👅 👄 🧠 🦷 👂 👃',
+  '❤️': '❤️ 🧡 💛 💚 💙 💜 🖤 🤍 🤎 💔 ❣️ 💕 💞 💓 💗 💖 💘 💝 💟 ☮️ ✝️ ☪️ 🕉️ ☸️ ✡️ 🔯 🕎 ☯️ ♈ ♉ ♊ ♋ ♌ ♍ ♎ ♏ ♐ ♑ ♒ ♓ 💯 ✅ ❌ ❓ ❗ ⚠️ 🔥 ✨ ⭐ 🌟 💫 ⚡ 💥 💢 💦 💨 🎉 🎊',
+  '🐶': '🐶 🐱 🐭 🐹 🐰 🦊 🐻 🐼 🐨 🐯 🦁 🐮 🐷 🐸 🐵 🙈 🙉 🙊 🐔 🐧 🐦 🐤 🦆 🦅 🦉 🦇 🐺 🐗 🐴 🦄 🐝 🐛 🦋 🐌 🐞 🐜 🐢 🐍 🦎 🐙 🦑 🦐 🦀 🐠 🐟 🐬 🐳 🐋 🦈 🐊 🐅 🐆 🦓 🦍 🐘 🦛 🐪 🐫 🦒 🦘 🐃 🐂 🐄 🐎 🐖 🐏 🐑 🐐 🦌 🐕 🐩 🐈 🐓 🦃 🕊️ 🐇 🐁 🐀 🌵 🌲 🌳 🌴 🌱 🌿 🍀 🍁 🍂 🍃 🌺 🌻 🌹 🌷 🌼 🌸',
+  '🍕': '🍏 🍎 🍐 🍊 🍋 🍌 🍉 🍇 🍓 🍈 🍒 🍑 🥭 🍍 🥥 🥝 🍅 🍆 🥑 🥦 🥒 🌶️ 🌽 🥕 🥔 🍞 🥐 🥖 🧀 🥚 🍳 🥞 🥓 🍔 🍟 🍕 🌭 🥪 🌮 🌯 🥗 🍝 🍜 🍲 🍛 🍣 🍱 🥟 🍤 🍙 🍚 🍘 🍥 🍦 🍧 🍨 🍩 🍪 🎂 🍰 🧁 🍫 🍬 🍭 🍮 ☕ 🍵 🥛 🍼 🍺 🍻 🥂 🍷 🥃 🍸 🍹 🥤',
+  '⚽': '⚽ 🏀 🏈 ⚾ 🎾 🏐 🏉 🎱 🏓 🏸 🥅 🏏 ⛳ 🏹 🎣 🥊 🥋 ⛸️ 🎿 🏂 🏆 🥇 🥈 🥉 🎖️ 🎯 🎮 🎲 🧩 🎭 🎨 🎬 🎤 🎧 🎼 🎹 🥁 🎷 🎺 🎸 🎻 📱 💻 🖥️ ⌚ 📷 📞 ☎️ 📺 🔋 🔌 💡 🔦 📚 📖 📝 ✏️ 📌 📎 ✂️ 🔒 🔑 💼 💰 💳 🎁 🛒',
+  '🚗': '🚗 🚕 🚙 🚌 🚎 🏎️ 🚓 🚑 🚒 🚚 🚜 🏍️ 🚲 🛵 ✈️ 🚀 🛸 🚁 ⛵ 🚤 🚢 🚂 🚆 🚇 🏠 🏡 🏢 🏬 🏥 🏦 🏨 🏫 ⛪ 🕌 🛕 🗼 🗽 🌅 🌄 🌇 🌃 🌉 🌍 🌎 🌏 🌙 ☀️ ⛅ ☁️ 🌧️ ⛈️ ❄️ ☃️ 🌈 🌊 🔥 ⛰️ 🏖️ 🏝️',
+};
+
+class _EmojiPanel extends StatefulWidget {
+  final void Function(String) onPick;
+  const _EmojiPanel(this.onPick);
+  @override
+  State<_EmojiPanel> createState() => _EmojiPanelState();
+}
+
+class _EmojiPanelState extends State<_EmojiPanel> {
+  String _g = kEmojiGroups.keys.first;
+  @override
+  Widget build(BuildContext context) {
+    final list = kEmojiGroups[_g]!.split(' ').where((e) => e.isNotEmpty).toList();
+    return Column(children: [
+      SizedBox(
+        height: 44,
+        child: ListView(
+          scrollDirection: Axis.horizontal,
+          padding: EdgeInsets.symmetric(horizontal: 10),
+          children: [
+            for (final k in kEmojiGroups.keys)
+              GestureDetector(
+                onTap: () => setState(() => _g = k),
+                child: Container(
+                  width: 44,
+                  margin: EdgeInsets.symmetric(horizontal: 3, vertical: 4),
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(color: _g == k ? C.accent.withAlpha(50) : Colors.transparent, borderRadius: BorderRadius.circular(14)),
+                  child: Text(k, style: TextStyle(fontSize: 22)),
+                ),
+              ),
+          ],
+        ),
+      ),
+      Expanded(
+        child: GridView.builder(
+          padding: EdgeInsets.fromLTRB(10, 4, 10, 10),
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 8, mainAxisSpacing: 2, crossAxisSpacing: 2),
+          itemCount: list.length,
+          itemBuilder: (_, i) => InkWell(
+            borderRadius: BorderRadius.circular(10),
+            onTap: () => widget.onPick(list[i]),
+            child: Center(child: Text(list[i], style: TextStyle(fontSize: 26))),
+          ),
+        ),
+      ),
+    ]);
+  }
+}
+
+/// Emoji keyboard + sticker packs in one sheet. Emojis go into the message box (the sheet stays open); a sticker is sent at once.
+Future<void> showEmojiStickerSheet(BuildContext context, {required void Function(String) onEmoji, required Future<void> Function(Sticker) onSticker, Map? roomPack}) {
+  final packs = [
+    ...kStickerPacks,
+    if (roomPack != null && roomPack.isNotEmpty)
+      for (final e in roomPack.entries) StickerPack(e.key.toString(), '⭐', [for (final x in (e.value as List)) Sticker(x.toString())]),
+  ];
+  return showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: C.card2,
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(26))),
+    builder: (sheetCtx) => SafeArea(
+      child: SizedBox(
+        height: MediaQuery.of(sheetCtx).size.height * .5,
+        child: DefaultTabController(
+          length: 2,
+          child: Column(children: [
+            SizedBox(height: 8),
+            Container(width: 42, height: 4, decoration: BoxDecoration(color: C.g3, borderRadius: BorderRadius.circular(4))),
+            TabBar(
+              labelColor: C.accent,
+              unselectedLabelColor: C.muted,
+              indicatorColor: C.accent,
+              dividerColor: Colors.transparent,
+              tabs: [Tab(text: 'Emoji'), Tab(text: 'Stickers')],
+            ),
+            Expanded(
+              child: TabBarView(children: [
+                _EmojiPanel(onEmoji),
+                _StickerSheet(packs, onPick: (st) async {
+                  Navigator.pop(sheetCtx);
+                  await onSticker(st);
+                }),
+              ]),
+            ),
+          ]),
+        ),
+      ),
+    ),
+  );
 }
