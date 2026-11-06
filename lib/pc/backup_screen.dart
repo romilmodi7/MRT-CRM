@@ -54,6 +54,28 @@ class _BackupScreenState extends State<BackupScreen> {
     await _load();
   }
 
+  Future<void> _custom() async {
+    final f = TextEditingController(text: BackupService.maxFiles > 0 ? '${BackupService.maxFiles}' : '');
+    final m = TextEditingController(text: BackupService.maxMb > 0 ? '${BackupService.maxMb}' : '');
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: C.card2,
+        title: Text('Custom speed'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          TextField(controller: f, keyboardType: TextInputType.number, decoration: InputDecoration(labelText: 'Files per hour (empty = no limit)')),
+          SizedBox(height: 8),
+          TextField(controller: m, keyboardType: TextInputType.number, decoration: InputDecoration(labelText: 'MB per hour (empty = no limit)')),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: Text('Save')),
+        ],
+      ),
+    );
+    if (ok == true) await BackupService.setLimit(int.tryParse(f.text.trim()) ?? 0, int.tryParse(m.text.trim()) ?? 0);
+  }
+
   @override
   Widget build(BuildContext context) {
     final recent = ((_st?['recent'] as List?) ?? []).whereType<Map>().toList();
@@ -83,6 +105,14 @@ class _BackupScreenState extends State<BackupScreen> {
                     Text('${BackupService.done} uploaded  -  ${BackupService.skipped} already saved${BackupService.failed > 0 ? '  -  ${BackupService.failed} failed' : ''}', style: TextStyle(fontSize: 12, color: C.muted)),
                     Text(BackupService.now, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12, color: C.hint)),
                   ],
+                  if (BackupService.waitMsg.isNotEmpty) ...[
+                    SizedBox(height: 10),
+                    Row(children: [Icon(Icons.schedule_rounded, size: 16, color: C.accent2), SizedBox(width: 6), Expanded(child: Text(BackupService.waitMsg, style: TextStyle(fontSize: 12, color: C.accent2)))]),
+                  ],
+                  if (BackupService.lastError.isNotEmpty) ...[
+                    SizedBox(height: 10),
+                    Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Icon(Icons.info_outline_rounded, size: 16, color: C.danger), SizedBox(width: 6), Expanded(child: Text(BackupService.lastError, style: TextStyle(fontSize: 12, color: C.danger)))]),
+                  ],
                 ]),
               ),
               SizedBox(height: 16),
@@ -92,6 +122,28 @@ class _BackupScreenState extends State<BackupScreen> {
                 for (final s in {'all': 'Photos + videos', 'photos': 'Photos only', 'videos': 'Videos only'}.entries)
                   ChoiceChip(label: Text(s.value), selected: BackupService.scope == s.key, onSelected: run ? null : (_) => BackupService.setScope(s.key), selectedColor: C.accent, labelStyle: TextStyle(color: BackupService.scope == s.key ? Colors.white : C.text)),
               ]),
+              SizedBox(height: 18),
+              Text('Backup speed', style: TextStyle(fontWeight: FontWeight.w700, color: C.muted)),
+              SizedBox(height: 8),
+              Wrap(spacing: 8, runSpacing: 4, children: [
+                for (final o in const [
+                  ['No limit', 0, 0],
+                  ['10 files / hour', 10, 0],
+                  ['30 files / hour', 30, 0],
+                  ['50 MB / hour', 0, 50],
+                  ['200 MB / hour', 0, 200],
+                ])
+                  ChoiceChip(
+                    label: Text(o[0] as String),
+                    selected: BackupService.maxFiles == o[1] && BackupService.maxMb == o[2],
+                    onSelected: (_) => BackupService.setLimit(o[1] as int, o[2] as int),
+                    selectedColor: C.accent,
+                    labelStyle: TextStyle(color: BackupService.maxFiles == o[1] && BackupService.maxMb == o[2] ? Colors.white : C.text),
+                  ),
+                ActionChip(label: Text('Custom'), onPressed: _custom),
+              ]),
+              SizedBox(height: 4),
+              Text('Now: ${BackupService.limitLabel}. When the limit is reached it waits and continues in the next hour (while the app is open).', style: TextStyle(color: C.hint, fontSize: 12)),
               SizedBox(height: 18),
               if (on)
                 run
