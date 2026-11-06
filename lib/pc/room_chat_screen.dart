@@ -1,15 +1,18 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:record/record.dart';
 
 import '../core/api.dart';
 import '../core/appearance.dart';
+import '../core/config.dart';
 import '../core/platform.dart';
 import '../core/session.dart';
 import '../core/stickers.dart';
@@ -465,6 +468,21 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
     if (mounted) toast(context, 'Getting your location...');
     final pos = await Geolocator.getCurrentPosition(locationSettings: LocationSettings(accuracy: LocationAccuracy.high, timeLimit: Duration(seconds: 20)));
     await _sendMsg({'type': 'location', 'body': {'lat': pos.latitude, 'lng': pos.longitude}}, PcMsg(id: -(++_tmp), mine: true, ts: DateTime.now().millisecondsSinceEpoch ~/ 1000, tick: 0, type: 'location', body: '{"lat":${pos.latitude},"lng":${pos.longitude}}', pending: true));
+  }
+
+  Future<void> _emojis() async {
+    await showEmojiStickerSheet(
+      context,
+      roomPack: widget.info['stickers'] is Map ? widget.info['stickers'] as Map : null,
+      onEmoji: (e) {
+        insertAtCursor(_input, e);
+        if (mounted) setState(() {});
+      },
+      onSticker: (st) async {
+        final body = StickerMsg.encode(st);
+        await _sendMsg({'type': 'text', 'body': body}, PcMsg(id: -(++_tmp), mine: true, ts: DateTime.now().millisecondsSinceEpoch ~/ 1000, tick: 0, type: 'text', body: body, pending: true));
+      },
+    );
   }
 
   Future<void> _stickers() async {
@@ -931,6 +949,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
           ),
         Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
           IconButton(onPressed: _active ? _attach : null, icon: Icon(Icons.add_circle_outline_rounded, color: C.accent2, size: 30)),
+          IconButton(onPressed: _active ? _emojis : null, icon: Icon(Icons.emoji_emotions_outlined, color: C.accent2, size: 28)),
           Expanded(
             child: TextField(
               controller: _input,
@@ -1032,11 +1051,22 @@ class _GifSheetState extends State<_GifSheet> {
   List<Map> _items = [];
   bool _loading = true;
   String _err = '';
+  bool _adult = Session.getBool('gif_adult');
 
   @override
   void initState() {
     super.initState();
     _go('');
+  }
+
+  Future<void> _toggleAdult() async {
+    if (!_adult) {
+      final ok = await confirm(context, 'Show adult (18+) GIFs in search? Turn this on only if you are 18 or older.', yes: 'Show 18+');
+      if (!ok) return;
+    }
+    await Session.setBool('gif_adult', !_adult);
+    setState(() => _adult = !_adult);
+    _go(_q.text.trim());
   }
 
   @override
@@ -1051,16 +1081,45 @@ class _GifSheetState extends State<_GifSheet> {
       _loading = true;
       _err = '';
     });
-    final r = await PcApi.get(PcApi.room('gifs'), {'q': q});
+    List<Map> items = [];
+    String err = '';
+    if (kGiphyKey.isNotEmpty) {
+      // straight from GIPHY (no server setup needed); 18+ switch = rating r, otherwise g
+      try {
+        final u = Uri.https('api.giphy.com', q.isEmpty ? '/v1/gifs/trending' : '/v1/gifs/search', {
+          'api_key': kGiphyKey,
+          if (q.isNotEmpty) 'q': q,
+          'limit': '30',
+          'rating': _adult ? 'r' : 'g',
+        });
+        final res = await http.get(u).timeout(Duration(seconds: 12));
+        final j = jsonDecode(utf8.decode(res.bodyBytes));
+        if (res.statusCode == 200 && j is Map) {
+          for (final g in (j['data'] as List? ?? [])) {
+            final im = (g as Map)['images'] as Map?;
+            final prev = (im?['fixed_height_small'] as Map?)?['url'];
+            final full = (im?['fixed_height'] as Map?)?['url'];
+            if (prev != null && full != null) items.add({'preview': prev.toString(), 'url': full.toString()});
+          }
+        } else {
+          err = res.statusCode == 429 ? 'GIF limit reached for now. Try again in a while.' : 'GIF search is not available right now.';
+        }
+      } catch (_) {
+        err = 'GIF search is not reachable. Check your internet.';
+      }
+    } else {
+      final r = await PcApi.get(PcApi.room('gifs'), {'q': q, 'adult': _adult ? '1' : '0'});
+      if (r.ok) {
+        items = ((r.json['items'] as List?) ?? []).whereType<Map>().toList();
+      } else {
+        err = r.msg;
+      }
+    }
     if (!mounted) return;
     setState(() {
       _loading = false;
-      if (r.ok) {
-        _items = ((r.json['items'] as List?) ?? []).whereType<Map>().toList();
-      } else {
-        _err = r.msg;
-        _items = [];
-      }
+      _err = err;
+      _items = items;
     });
   }
 
@@ -1071,7 +1130,22 @@ class _GifSheetState extends State<_GifSheet> {
       child: SizedBox(
         height: MediaQuery.of(context).size.height * .6,
         child: Column(children: [
-          Padding(padding: EdgeInsets.all(14), child: TextField(controller: _q, onChanged: (v) => _deb.run(() => _go(v.trim())), decoration: InputDecoration(hintText: 'Search GIFs', prefixIcon: Icon(Icons.search_rounded, color: C.hint)))),
+          Padding(
+            padding: EdgeInsets.fromLTRB(14, 14, 14, 8),
+            child: Row(children: [
+              Expanded(child: TextField(controller: _q, onChanged: (v) => _deb.run(() => _go(v.trim())), decoration: InputDecoration(hintText: 'Search GIFs', prefixIcon: Icon(Icons.search_rounded, color: C.hint)))),
+              SizedBox(width: 10),
+              GestureDetector(
+                onTap: _toggleAdult,
+                child: AnimatedContainer(
+                  duration: Duration(milliseconds: 180),
+                  padding: EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+                  decoration: BoxDecoration(color: _adult ? C.danger.withAlpha(46) : C.g1, borderRadius: BorderRadius.circular(20), border: Border.all(color: _adult ? C.danger : C.line, width: _adult ? 1.6 : 1)),
+                  child: Text(_adult ? '18+ ON' : '18+ OFF', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 12, color: _adult ? C.danger : C.muted)),
+                ),
+              ),
+            ]),
+          ),
           Expanded(
             child: _loading
                 ? Center(child: CircularProgressIndicator(color: C.accent2))
