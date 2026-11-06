@@ -1048,14 +1048,24 @@ class _GifSheet extends StatefulWidget {
 class _GifSheetState extends State<_GifSheet> {
   final _q = TextEditingController();
   final _deb = Debouncer(Duration(milliseconds: 500));
+  final _scroll = ScrollController();
   List<Map> _items = [];
   bool _loading = true;
+  bool _loadingMore = false;
+  bool _more = false;
+  int _offset = 0;
+  int _token = 0; // ignores answers that belong to an older search
   String _err = '';
+  String _query = '';
   bool _adult = Session.getBool('gif_adult');
+  static const _page = 30;
 
   @override
   void initState() {
     super.initState();
+    _scroll.addListener(() {
+      if (_scroll.hasClients && _scroll.position.pixels > _scroll.position.maxScrollExtent - 400) _loadMore();
+    });
     _go('');
   }
 
@@ -1073,23 +1083,23 @@ class _GifSheetState extends State<_GifSheet> {
   void dispose() {
     _deb.cancel();
     _q.dispose();
+    _scroll.dispose();
     super.dispose();
   }
 
-  Future<void> _go(String q) async {
-    setState(() {
-      _loading = true;
-      _err = '';
-    });
-    List<Map> items = [];
+  /// One page of results. Returns items, an error text and whether more pages exist.
+  Future<({List<Map> items, String err, bool more})> _fetch(String q, int offset) async {
+    final items = <Map>[];
     String err = '';
+    bool more = false;
     if (kGiphyKey.isNotEmpty) {
       // straight from GIPHY (no server setup needed); 18+ switch = rating r, otherwise g
       try {
         final u = Uri.https('api.giphy.com', q.isEmpty ? '/v1/gifs/trending' : '/v1/gifs/search', {
           'api_key': kGiphyKey,
           if (q.isNotEmpty) 'q': q,
-          'limit': '30',
+          'limit': '$_page',
+          'offset': '$offset',
           'rating': _adult ? 'r' : 'g',
         });
         final res = await http.get(u).timeout(Duration(seconds: 12));
@@ -1101,6 +1111,10 @@ class _GifSheetState extends State<_GifSheet> {
             final full = (im?['fixed_height'] as Map?)?['url'];
             if (prev != null && full != null) items.add({'preview': prev.toString(), 'url': full.toString()});
           }
+          final pg = j['pagination'] as Map?;
+          final total = (pg?['total_count'] as num?)?.toInt() ?? 0;
+          final got = (pg?['count'] as num?)?.toInt() ?? (j['data'] as List? ?? []).length;
+          more = got > 0 && (offset + got) < (total > 0 ? total : offset + got + 1) && offset + got < 4000;
         } else {
           err = res.statusCode == 429 ? 'GIF limit reached for now. Try again in a while.' : 'GIF search is not available right now.';
         }
@@ -1108,18 +1122,52 @@ class _GifSheetState extends State<_GifSheet> {
         err = 'GIF search is not reachable. Check your internet.';
       }
     } else {
-      final r = await PcApi.get(PcApi.room('gifs'), {'q': q, 'adult': _adult ? '1' : '0'});
+      final r = await PcApi.get(PcApi.room('gifs'), {'q': q, 'adult': _adult ? '1' : '0', 'offset': '$offset'});
       if (r.ok) {
-        items = ((r.json['items'] as List?) ?? []).whereType<Map>().toList();
+        items.addAll(((r.json['items'] as List?) ?? []).whereType<Map>());
+        more = r.json['more'] == true;
       } else {
         err = r.msg;
       }
     }
-    if (!mounted) return;
+    return (items: items, err: err, more: more);
+  }
+
+  Future<void> _go(String q) async {
+    final t = ++_token;
+    setState(() {
+      _loading = true;
+      _loadingMore = false;
+      _err = '';
+      _query = q;
+      _offset = 0;
+      _more = false;
+    });
+    final r = await _fetch(q, 0);
+    if (!mounted || t != _token) return;
     setState(() {
       _loading = false;
-      _err = err;
-      _items = items;
+      _err = r.err;
+      _items = r.items;
+      _offset = r.items.length;
+      _more = r.more;
+    });
+    if (_scroll.hasClients) _scroll.jumpTo(0);
+  }
+
+  Future<void> _loadMore() async {
+    if (_loading || _loadingMore || !_more || _err.isNotEmpty) return;
+    final t = _token;
+    setState(() => _loadingMore = true);
+    final r = await _fetch(_query, _offset);
+    if (!mounted || t != _token) return;
+    final seen = _items.map((e) => e['url'].toString()).toSet();
+    final fresh = r.items.where((e) => !seen.contains(e['url'].toString())).toList();
+    setState(() {
+      _loadingMore = false;
+      _items = [..._items, ...fresh];
+      _offset += r.items.length;
+      _more = r.more && r.items.isNotEmpty;
     });
   }
 
@@ -1152,13 +1200,19 @@ class _GifSheetState extends State<_GifSheet> {
                 : _err.isNotEmpty
                     ? Center(child: Padding(padding: EdgeInsets.all(24), child: Text(_err, textAlign: TextAlign.center, style: TextStyle(color: C.muted))))
                     : GridView.builder(
+                        controller: _scroll,
                         padding: EdgeInsets.fromLTRB(12, 0, 12, 12),
                         gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 3, crossAxisSpacing: 6, mainAxisSpacing: 6),
-                        itemCount: _items.length,
-                        itemBuilder: (_, i) => GestureDetector(
-                          onTap: () => Navigator.pop(context, _items[i]['url'].toString()),
-                          child: ClipRRect(borderRadius: BorderRadius.circular(10), child: Image.network(_items[i]['preview'].toString(), fit: BoxFit.cover, errorBuilder: (_, __, ___) => Container(color: C.g2))),
-                        ),
+                        itemCount: _items.length + (_loadingMore ? 3 : 0),
+                        itemBuilder: (_, i) {
+                          if (i >= _items.length) {
+                            return Container(decoration: BoxDecoration(color: C.g2, borderRadius: BorderRadius.circular(10)), child: Center(child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: C.accent2))));
+                          }
+                          return GestureDetector(
+                            onTap: () => Navigator.pop(context, _items[i]['url'].toString()),
+                            child: ClipRRect(borderRadius: BorderRadius.circular(10), child: Image.network(_items[i]['preview'].toString(), fit: BoxFit.cover, errorBuilder: (_, __, ___) => Container(color: C.g2))),
+                          );
+                        },
                       ),
           ),
         ]),
