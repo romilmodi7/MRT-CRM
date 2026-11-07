@@ -14,6 +14,7 @@ import '../core/widgets.dart';
 import '../pc/backup_service.dart';
 import '../pc/rooms_screen.dart';
 import 'conversation_screen.dart';
+import 'leave_screen.dart';
 import 'login_screen.dart';
 import 'people_screen.dart';
 
@@ -184,6 +185,7 @@ class _ThreadsScreenState extends State<ThreadsScreen> with WidgetsBindingObserv
                   },
                   icon: Icon(Session.muted ? Icons.notifications_off_rounded : Icons.notifications_active_rounded, color: Session.muted ? C.hint : C.accent2),
                 ),
+                IconButton(onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => LeaveScreen())), icon: Icon(Icons.event_available_rounded, color: C.accent2), tooltip: 'Apply leave'),
                 IconButton(onPressed: () => showAppearanceSheet(context), icon: Icon(C.dark ? Icons.dark_mode_rounded : Icons.light_mode_rounded, color: C.accent2)),
                 IconButton(onPressed: _logout, icon: Icon(Icons.logout_rounded, color: C.muted)),
               ]),
