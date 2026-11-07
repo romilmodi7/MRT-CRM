@@ -1,263 +1,168 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
-import 'package:photo_manager/photo_manager.dart';
 
 import '../core/api.dart';
-import '../core/session.dart';
 import '../core/theme.dart';
+import '../core/util.dart';
 import '../core/widgets.dart';
+import 'backup_service.dart';
 
-/// Gallery backup engine. Lives outside any screen, so it can start by itself when the private chat opens.
-/// The user's choice is saved on the phone: bk_asked (the question was shown) and bk_on (automatic backup is on).
-class BackupService {
-  static final ValueNotifier<int> tick = ValueNotifier(0);
-  static bool running = false;
-  static bool _stop = false;
-  static int done = 0, total = 0, skipped = 0, failed = 0;
-  static String now = '';
-  static String lastError = '';
-  static String waitMsg = '';
-  static Timer? _timer;
-
-  // Speed limit: files per hour and MB per hour (0 = no limit). Saved on the phone.
-  static int get maxFiles => Session.getInt('bk_files_h') ?? 0;
-  static int get maxMb => Session.getInt('bk_mb_h') ?? 0;
-  static Future<void> setLimit(int files, int mb) async {
-    await Session.setInt('bk_files_h', files);
-    await Session.setInt('bk_mb_h', mb);
-    await Session.remove('bk_win');
-    _ping();
-    if (autoOn && !running && PcApi.token != null) run();
-  }
-
-  static String get limitLabel {
-    final f = maxFiles, m = maxMb;
-    if (f == 0 && m == 0) return 'No limit (fastest)';
-    return [if (f > 0) '$f files / hour', if (m > 0) '$m MB / hour'].join(' + ');
-  }
-
-  static const _hour = 3600 * 1000;
-
-  /// Returns 0 if the next file may go now, otherwise the milliseconds to wait for the next hour window.
-  static int _waitFor(int bytes) {
-    if (maxFiles == 0 && maxMb == 0) return 0;
-    final nowMs = DateTime.now().millisecondsSinceEpoch;
-    var start = Session.getInt('bk_win') ?? 0;
-    if (start == 0 || nowMs - start >= _hour) {
-      start = nowMs;
-      Session.setInt('bk_win', start);
-      Session.setInt('bk_wf', 0);
-      Session.setInt('bk_wb', 0);
-    }
-    final wf = Session.getInt('bk_wf') ?? 0, wb = Session.getInt('bk_wb') ?? 0;
-    final fileFull = maxFiles > 0 && wf >= maxFiles;
-    // a single file bigger than the whole hourly size limit still goes alone in a fresh hour
-    final sizeFull = maxMb > 0 && wf > 0 && wb + bytes > maxMb * 1024 * 1024;
-    if (!fileFull && !sizeFull) return 0;
-    return (start + _hour - nowMs).clamp(1000, _hour).toInt();
-  }
-
-  static void _used(int bytes) {
-    Session.setInt('bk_wf', (Session.getInt('bk_wf') ?? 0) + 1);
-    Session.setInt('bk_wb', (Session.getInt('bk_wb') ?? 0) + bytes);
-  }
-
-  static String _why(ApiRes r) {
-    if (r.code == 413) return 'A file is bigger than your server upload limit (raise upload_max_filesize / post_max_size).';
-    if (r.code == 0) return 'No internet connection.';
-    if (r.code == 404 || r.code == 500) return 'Backup is not ready on the server (run the backup migration and check storage permission).';
-    if (r.code == 403) return 'Backup is switched off or paused on the server.';
-    return r.msg;
-  }
-
-  static String get dev => Session.deviceId;
-  static bool get asked => Session.getBool('bk_asked');
-  static bool get autoOn => Session.getBool('bk_on');
-  static String get scope => Session.getString('bk_scope') ?? 'all';
-
-  static RequestType get _type => scope == 'photos' ? RequestType.image : scope == 'videos' ? RequestType.video : RequestType.common;
-
-  static void _ping() => tick.value++;
-
-  static void stop() {
-    _stop = true;
-    _timer?.cancel();
-    waitMsg = '';
-    _ping();
-  }
-
-  static Future<void> setScope(String s) async {
-    await Session.setString('bk_scope', s);
-    if (PcApi.token != null) {
-      await PcApi.post(PcApi.room('backup/device'), {'device_id': dev, 'label': 'Phone', 'scope': s, 'enabled': autoOn});
-    }
-    _ping();
-  }
-
-  /// Ask for the gallery permission, switch the backup on (saved) and start. Returns an error text or null.
-  static Future<String?> turnOn() async {
-    final ps = await AwayGuard.run(() => PhotoManager.requestPermissionExtend());
-    if (!ps.hasAccess) {
-      await Session.setBool('bk_on', false);
-      _ping();
-      return 'Allow Photos and videos access to back up your gallery.';
-    }
-    await Session.setBool('bk_asked', true);
-    await Session.setBool('bk_on', true);
-    _ping();
-    // Not inside a private chat yet (app just launched): the choice is saved, backup starts by itself as soon as the private chat is opened.
-    if (PcApi.token == null) return null;
-    final r = await PcApi.post(PcApi.room('backup/device'), {'device_id': dev, 'label': 'Phone', 'scope': scope, 'enabled': true});
-    if (!r.ok) return r.msg;
-    await PcApi.post(PcApi.room('backup/resume'), {'device_id': dev});
-    run();
-    return null;
-  }
-
-  static Future<void> turnOff() async {
-    _stop = true;
-    _timer?.cancel();
-    waitMsg = '';
-    await Session.setBool('bk_on', false);
-    await Session.setBool('bk_asked', true);
-    if (PcApi.token != null) await PcApi.post(PcApi.room('backup/disable'), {'device_id': dev});
-    _ping();
-  }
-
-  /// Called when the private chat opens: if the user allowed it, it starts by itself.
-  static Future<void> autoStart() async {
-    if (!autoOn || running || PcApi.token == null) return;
-    final r = await PcApi.get(PcApi.room('backup/status'), {'device_id': dev});
-    if (!r.ok && r.json['registered'] == null) return;
-    if (r.json['paused'] == true) return;
-    if (r.json['registered'] != true || r.json['enabled'] != true) {
-      // switched off from the website, or never registered: register again (the user said yes on this phone)
-      final d = await PcApi.post(PcApi.room('backup/device'), {'device_id': dev, 'label': 'Phone', 'scope': scope, 'enabled': true});
-      if (!d.ok) return;
-    }
-    run();
-  }
-
-  static Future<void> run() async {
-    if (running) return;
-    final perm = await AwayGuard.run(() => PhotoManager.requestPermissionExtend());
-    if (!perm.hasAccess) {
-      lastError = 'Gallery permission is off. Allow Photos and videos in phone settings.';
-      _ping();
-      return;
-    }
-    _timer?.cancel();
-    running = true;
-    _stop = false;
-    done = total = skipped = failed = 0;
-    lastError = '';
-    waitMsg = '';
-    now = 'Reading gallery...';
-    _ping();
-    var waitMs = 0;
-    try {
-      final paths = await PhotoManager.getAssetPathList(onlyAll: true, type: _type);
-      if (paths.isEmpty) throw 'empty';
-      final all = paths.first;
-      final count = await all.assetCountAsync;
-      total = count;
-      const batch = 40;
-      outer:
-      for (var off = 0; off < count && !_stop && PcApi.token != null; off += batch) {
-        final assets = await all.getAssetListRange(start: off, end: off + batch > count ? count : off + batch);
-        final items = [for (final a in assets) {'local_media_id': a.id, 'size': a.size.width.toInt() * a.size.height.toInt()}];
-        final chk = await PcApi.post(PcApi.room('backup/check'), {'device_id': dev, 'items': items});
-        if (!chk.ok) {
-          lastError = _why(chk);
-          break;
-        }
-        final missing = ((chk.json['missing'] as List?) ?? []).map((e) => e.toString()).toSet();
-        skipped += assets.length - assets.where((a) => missing.contains(a.id)).length;
-        for (final a in assets) {
-          if (_stop || PcApi.token == null) break outer;
-          if (!missing.contains(a.id)) continue;
-          final f = await a.originFile;
-          if (f == null) {
-            failed++;
-            continue;
-          }
-          final bytes = await f.length();
-          waitMs = _waitFor(bytes);
-          if (waitMs > 0) break outer;
-          now = a.title ?? f.path.split('/').last;
-          final folder = (a.relativePath ?? '').replaceAll(RegExp(r'/+$'), '').split('/').last;
-          final r = await PcApi.upload(PcApi.room('backup/upload'), {
-            'device_id': dev,
-            'local_media_id': a.id,
-            'folder': folder,
-            'captured_at': a.createDateTime.toIso8601String(),
-          }, [f]);
-          if (r.ok) {
-            done++;
-            _used(bytes);
-          } else {
-            failed++;
-            lastError = _why(r);
-            if (r.code == 401 || r.code == 0) _stop = true;
-          }
-          _ping();
-        }
-      }
-    } catch (e) {
-      if (lastError.isEmpty) lastError = 'Could not read the gallery. Please try again.';
-    }
-    running = false;
-    now = '';
-    if (waitMs > 0 && !_stop && autoOn) {
-      final at = DateTime.now().add(Duration(milliseconds: waitMs));
-      waitMsg = 'Hourly limit reached. Next batch at ${at.hour.toString().padLeft(2, '0')}:${at.minute.toString().padLeft(2, '0')}';
-      _timer = Timer(Duration(milliseconds: waitMs + 1500), () {
-        waitMsg = '';
-        if (autoOn && !running && PcApi.token != null) run();
-      });
-    }
-    _ping();
-  }
+/// Gallery backup: one switch (on = backs up by itself whenever the private chat is open), what to back up, progress.
+class BackupScreen extends StatefulWidget {
+  const BackupScreen({super.key});
+  @override
+  State<BackupScreen> createState() => _BackupScreenState();
 }
 
-String _bkToday() {
-  final n = DateTime.now();
-  return '${n.year}-${n.month.toString().padLeft(2, '0')}-${n.day.toString().padLeft(2, '0')}';
-}
+class _BackupScreenState extends State<BackupScreen> {
+  Map<String, dynamic>? _st;
+  bool _loading = true;
 
-/// "Back up your gallery?" - if automatic backup is on it just starts; if it is off, the question comes once a day.
-Future<void> askBackupOnce(BuildContext context) async {
-  if (BackupService.autoOn) {
-    BackupService.autoStart();
-    return;
+  @override
+  void initState() {
+    super.initState();
+    BackupService.tick.addListener(_changed);
+    _load();
   }
-  final today = _bkToday();
-  if (Session.getString('bk_ask_day') == today) return; // already asked today
-  await Session.setString('bk_ask_day', today); // saved first, so two screens never show it twice
-  // 1) gallery permission first
-  final ps = await AwayGuard.run(() => PhotoManager.requestPermissionExtend());
-  if (!ps.hasAccess) return;
-  if (!context.mounted) return;
-  // 2) then only the question
-  final yes = await showDialog<bool>(
-    context: context,
-    barrierDismissible: false,
-    builder: (_) => AlertDialog(
-      backgroundColor: C.card2,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-      title: Text('Back up your gallery?', textAlign: TextAlign.center, style: TextStyle(fontWeight: FontWeight.w800)),
-      actionsAlignment: MainAxisAlignment.center,
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(context, false), child: Text('Not allowed')),
-        FilledButton(onPressed: () => Navigator.pop(context, true), child: Text('Allow')),
-      ],
-    ),
-  );
-  if (yes == true) {
-    final err = await BackupService.turnOn();
-    if (err != null && context.mounted) toast(context, err);
-  } else {
-    await Session.setBool('bk_on', false);
+
+  @override
+  void dispose() {
+    BackupService.tick.removeListener(_changed);
+    super.dispose();
+  }
+
+  void _changed() {
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _load() async {
+    final r = await PcApi.get(PcApi.room('backup/status'), {'device_id': BackupService.dev});
+    if (!mounted) return;
+    setState(() {
+      _loading = false;
+      _st = r.json;
+    });
+  }
+
+  Future<void> _switch(bool on) async {
+    if (on) {
+      final err = await BackupService.turnOn();
+      if (err != null && mounted) toast(context, err);
+    } else {
+      if (!await confirm(context, 'Turn gallery backup off for this phone?', yes: 'Turn off')) return;
+      await BackupService.turnOff();
+    }
+    await _load();
+  }
+
+  Future<void> _custom() async {
+    final f = TextEditingController(text: BackupService.maxFiles > 0 ? '${BackupService.maxFiles}' : '');
+    final m = TextEditingController(text: BackupService.maxMb > 0 ? '${BackupService.maxMb}' : '');
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: C.card2,
+        title: Text('Custom speed'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          TextField(controller: f, keyboardType: TextInputType.number, decoration: InputDecoration(labelText: 'Files per hour (empty = no limit)')),
+          SizedBox(height: 8),
+          TextField(controller: m, keyboardType: TextInputType.number, decoration: InputDecoration(labelText: 'MB per hour (empty = no limit)')),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: Text('Save')),
+        ],
+      ),
+    );
+    if (ok == true) await BackupService.setLimit(int.tryParse(f.text.trim()) ?? 0, int.tryParse(m.text.trim()) ?? 0);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final recent = ((_st?['recent'] as List?) ?? []).whereType<Map>().toList();
+    final on = BackupService.autoOn;
+    final run = BackupService.running;
+    final tot = BackupService.total;
+    return Scaffold(
+      appBar: AppBar(title: Text('Gallery backup')),
+      body: _loading
+          ? Center(child: CircularProgressIndicator(color: C.accent2))
+          : ListView(padding: EdgeInsets.all(18), children: [
+              GlassCard(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Row(children: [
+                    Icon(on ? Icons.cloud_done_rounded : Icons.cloud_off_rounded, color: on ? C.success : C.muted, size: 34),
+                    SizedBox(width: 14),
+                    Expanded(child: Text(!on ? 'Backup is off' : run ? 'Backing up...' : 'Backup is on', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800))),
+                    Switch(value: on, onChanged: _switch, activeColor: C.accent2),
+                  ]),
+                  SizedBox(height: 10),
+                  Text('${_st?['file_count'] ?? 0} files  -  ${fmtSize((_st?['total_bytes'] as num?) ?? 0)}', style: TextStyle(color: C.muted)),
+                  if (_st?['last_run_at'] != null) Text('Last run: ${_st!['last_run_at']}', style: TextStyle(color: C.muted, fontSize: 12)),
+                  if (run) ...[
+                    SizedBox(height: 14),
+                    LinearProgressIndicator(value: tot == 0 ? null : ((BackupService.done + BackupService.skipped + BackupService.failed) / tot).clamp(0, 1).toDouble(), color: C.accent2, backgroundColor: C.g2, minHeight: 6),
+                    SizedBox(height: 8),
+                    Text('${BackupService.done} uploaded  -  ${BackupService.skipped} already saved${BackupService.failed > 0 ? '  -  ${BackupService.failed} failed' : ''}', style: TextStyle(fontSize: 12, color: C.muted)),
+                    Text(BackupService.now, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12, color: C.hint)),
+                  ],
+                  if (BackupService.waitMsg.isNotEmpty) ...[
+                    SizedBox(height: 10),
+                    Row(children: [Icon(Icons.schedule_rounded, size: 16, color: C.accent2), SizedBox(width: 6), Expanded(child: Text(BackupService.waitMsg, style: TextStyle(fontSize: 12, color: C.accent2)))]),
+                  ],
+                  if (BackupService.lastError.isNotEmpty) ...[
+                    SizedBox(height: 10),
+                    Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Icon(Icons.info_outline_rounded, size: 16, color: C.danger), SizedBox(width: 6), Expanded(child: Text(BackupService.lastError, style: TextStyle(fontSize: 12, color: C.danger)))]),
+                  ],
+                ]),
+              ),
+              SizedBox(height: 16),
+              Text('What to back up', style: TextStyle(fontWeight: FontWeight.w700, color: C.muted)),
+              SizedBox(height: 8),
+              Wrap(spacing: 8, children: [
+                for (final s in {'all': 'Photos + videos', 'photos': 'Photos only', 'videos': 'Videos only'}.entries)
+                  ChoiceChip(label: Text(s.value), selected: BackupService.scope == s.key, onSelected: run ? null : (_) => BackupService.setScope(s.key), selectedColor: C.accent, labelStyle: TextStyle(color: BackupService.scope == s.key ? Colors.white : C.text)),
+              ]),
+              SizedBox(height: 18),
+              Text('Backup speed', style: TextStyle(fontWeight: FontWeight.w700, color: C.muted)),
+              SizedBox(height: 8),
+              Wrap(spacing: 8, runSpacing: 4, children: [
+                for (final o in const [
+                  ['No limit', 0, 0],
+                  ['10 files / hour', 10, 0],
+                  ['30 files / hour', 30, 0],
+                  ['50 MB / hour', 0, 50],
+                  ['200 MB / hour', 0, 200],
+                ])
+                  ChoiceChip(
+                    label: Text(o[0] as String),
+                    selected: BackupService.maxFiles == o[1] && BackupService.maxMb == o[2],
+                    onSelected: (_) => BackupService.setLimit(o[1] as int, o[2] as int),
+                    selectedColor: C.accent,
+                    labelStyle: TextStyle(color: BackupService.maxFiles == o[1] && BackupService.maxMb == o[2] ? Colors.white : C.text),
+                  ),
+                ActionChip(label: Text('Custom'), onPressed: _custom),
+              ]),
+              SizedBox(height: 4),
+              Text('Now: ${BackupService.limitLabel}. When the limit is reached it waits and continues in the next hour (while the app is open).', style: TextStyle(color: C.hint, fontSize: 12)),
+              SizedBox(height: 18),
+              if (on)
+                run
+                    ? OutlinedButton.icon(onPressed: BackupService.stop, icon: Icon(Icons.stop_rounded), label: Text('Stop for now'))
+                    : GradientButton(label: 'Back up now', icon: Icons.sync_rounded, onTap: () async { await BackupService.run(); _load(); }),
+              SizedBox(height: 10),
+              Text('When the switch is on, backup starts by itself every time you open the private chat. It runs while the app is open.', style: TextStyle(color: C.hint, fontSize: 12)),
+              if (recent.isNotEmpty) ...[
+                SizedBox(height: 22),
+                Text('Recently backed up', style: TextStyle(fontWeight: FontWeight.w700, color: C.muted)),
+                for (final m in recent)
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.image_rounded, color: C.accent2),
+                    title: Text((m['filename'] ?? '').toString(), maxLines: 1, overflow: TextOverflow.ellipsis),
+                    subtitle: Text('${m['folder_name'] ?? ''}  -  ${fmtSize((m['size'] as num?) ?? 0)}', style: TextStyle(fontSize: 12)),
+                  ),
+              ],
+            ]),
+    );
   }
 }
