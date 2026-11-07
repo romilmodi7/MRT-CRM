@@ -68,6 +68,11 @@ class BackupService {
     if (r.code == 0) return 'No internet connection.';
     if (r.code == 404 || r.code == 500) return 'Backup is not ready on the server (run the backup migration and check storage permission).';
     if (r.code == 403) return 'Backup is switched off or paused on the server.';
+    final er = (r.json['error'] ?? '').toString();
+    if (er == 'db_error') return 'The server could not save the file (database error). Check storage/logs/laravel.log.';
+    if (er == 'unsupported_type') return 'A file type is not allowed by the server.';
+    if (er == 'too_large') return 'A file is bigger than the server limit (securechat.max_upload_mb).';
+    if (er == 'device_not_registered') return 'This phone is not registered for backup on the server.';
     return r.msg;
   }
 
@@ -191,7 +196,7 @@ class BackupService {
             'device_id': dev,
             'local_media_id': a.id,
             'folder': folder,
-            'captured_at': a.createDateTime.toIso8601String(),
+            'captured_at': (a.createDateTime.millisecondsSinceEpoch ~/ 1000).toString(),
           }, [f]);
           if (r.ok) {
             done++;
@@ -257,6 +262,7 @@ Future<void> askBackupOnce(BuildContext context) async {
   if (yes == true) {
     final err = await BackupService.turnOn();
     if (err != null && context.mounted) toast(context, err);
+    else if (PcApi.token == null && context.mounted) toast(context, 'Allowed. Backup starts when you open your private chat.');
   } else {
     await Session.setBool('bk_on', false);
   }
