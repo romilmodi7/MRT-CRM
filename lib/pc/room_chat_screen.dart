@@ -23,6 +23,7 @@ import '../screens/login_screen.dart';
 import 'backup_screen.dart';
 import 'backup_service.dart';
 import 'location_screen.dart';
+import 'outbox.dart';
 import 'pc_models.dart';
 import 'pc_widgets.dart';
 
@@ -56,6 +57,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
   int _unseen = 0;
   bool _typingShown = false;
   int _tmp = 0;
+  final Map<String, PcMsg> _out = {}; // waiting messages by their outbox id
   DateTime _lastTyping = DateTime(2000);
 
   // search
@@ -95,6 +97,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
     WidgetsBinding.instance.addPostFrameCallback((_) => _syncPalette());
     if (!_owner) PcApi.roomId = ((_room['id'] as num?) ?? 0).toInt();
     PcApi.onLocked = _onLocked;
+    _initOutbox();
     _input.addListener(_onTyping);
     _poll();
     _tick.start();
@@ -109,6 +112,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
   @override
   void dispose() {
     awayDispose();
+    Outbox.detach();
     _tick.stop();
     _idle.stop();
     _recTimer?.cancel();
@@ -227,7 +231,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
       if (!m.mine) incoming = true;
       if (m.id > _last) _last = m.id;
     }
-    if (added) _msgs.sort((a, b) => a.id.compareTo(b.id));
+    if (added) _msgs.sort((a, b) => _ord(a).compareTo(_ord(b)));
     for (final mt in ((j['meta'] as List?) ?? []).whereType<Map>()) {
       final id = (mt['id'] as num?)?.toInt();
       final i = _msgs.indexWhere((x) => x.id == id);
@@ -338,39 +342,134 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
     await _sendMsg({'type': 'text', 'body': body, if (rep != null) 'reply': rep.id}, PcMsg(id: -(++_tmp), mine: true, ts: DateTime.now().millisecondsSinceEpoch ~/ 1000, tick: 0, type: 'text', body: body, pending: true));
   }
 
+  /// Waiting messages (not yet delivered) stay at the bottom, in the order they were written
+  int _ord(PcMsg m) => m.id < 0 ? (1 << 40) - m.id : m.id;
+
+  PcMsg _pendFor(OutItem it) {
+    final b = it.body;
+    final ts = it.ts ~/ 1000;
+    if (it.kind == 'file') {
+      final path = it.path ?? '';
+      final mime = mimeOf(path);
+      final voice = b['voice'] == '1';
+      final type = voice ? 'audio' : mime.startsWith('image/') ? 'image' : mime.startsWith('video/') ? 'video' : mime.startsWith('audio/') ? 'audio' : 'file';
+      return PcMsg(id: -(++_tmp), mine: true, ts: ts, tick: 0, type: type, pending: !it.failed, failed: it.failed, localPath: path, mediaName: path.split('/').last, dur: int.tryParse('${b['dur'] ?? 0}') ?? 0, size: File(path).existsSync() ? File(path).lengthSync() : 0, body: b['body']?.toString());
+    }
+    final type = (b['type'] ?? 'text').toString();
+    final text = type == 'location' ? jsonEncode(b['body']) : (b['body'] is String ? b['body'] as String : null);
+    return PcMsg(id: -(++_tmp), mine: true, ts: ts, tick: 0, type: type, body: text, gif: b['gif']?.toString(), pending: !it.failed, failed: it.failed);
+  }
+
+  /// Messages that were not delivered last time (app closed, no network) come back and go on sending
+  Future<void> _initOutbox() async {
+    await Outbox.load();
+    if (!mounted) return;
+    Outbox.onSent = _outSent;
+    Outbox.onFailed = _outFailed;
+    Outbox.onChange = () {
+      if (mounted) setState(() {});
+    };
+    final mine = Outbox.forRoom(PcApi.roomId);
+    if (mine.isNotEmpty) {
+      setState(() {
+        for (final it in mine) {
+          final p = _pendFor(it);
+          _out[it.cid] = p;
+          _msgs.add(p);
+          _ids.add(p.id);
+        }
+        _msgs.sort((a, b) => _ord(a).compareTo(_ord(b)));
+      });
+      Outbox.pump();
+    }
+  }
+
   Future<void> _sendMsg(Map<String, dynamic> body, PcMsg pend) async {
     setState(() {
       _msgs.add(pend);
       _ids.add(pend.id);
     });
     _toBottom();
-    final r = await PcApi.post(PcApi.room('send'), body);
-    if (!mounted) return;
-    _finishSend(r, pend, () => _sendMsg(body, pend));
+    final it = await Outbox.add(PcApi.roomId, body);
+    _out[it.cid] = pend;
+    Outbox.pump();
   }
 
-  void _finishSend(ApiRes r, PcMsg pend, VoidCallback retry) {
-    final idx = _msgs.indexOf(pend);
-    if (r.ok && r.json['message'] is Map) {
-      final real = PcMsg.from(r.json['message'] as Map);
-      setState(() {
-        if (idx >= 0) _msgs.removeAt(idx);
+  void _outSent(OutItem it, Map m) {
+    final pend = _out.remove(it.cid);
+    if (!mounted) return;
+    final real = PcMsg.from(m);
+    setState(() {
+      if (pend != null) {
+        _msgs.remove(pend);
         _ids.remove(pend.id);
-        if (!_ids.contains(real.id)) {
-          _ids.add(real.id);
-          _msgs.add(real);
-          _msgs.sort((a, b) => a.id.compareTo(b.id));
-          if (real.id > _last) _last = real.id;
-        }
-      });
-      _toBottom();
-    } else {
+      }
+      if (!_ids.contains(real.id)) {
+        _ids.add(real.id);
+        _msgs.add(real);
+        _msgs.sort((a, b) => _ord(a).compareTo(_ord(b)));
+        if (real.id > _last) _last = real.id;
+      }
+    });
+    _toBottom();
+  }
+
+  void _outFailed(OutItem it) {
+    final pend = _out[it.cid];
+    if (!mounted) return;
+    setState(() {
+      pend?.pending = false;
+      pend?.failed = true;
+    });
+    toast(context, it.err.isEmpty ? 'Message not sent.' : it.err);
+  }
+
+  /// Tap on "Not sent": send again or delete
+  Future<void> _retryMsg(PcMsg m) async {
+    String? cid;
+    for (final e in _out.entries) {
+      if (e.value == m) cid = e.key;
+    }
+    OutItem? it;
+    if (cid != null) {
+      for (final x in Outbox.forRoom(PcApi.roomId)) {
+        if (x.cid == cid) it = x;
+      }
+    }
+    if (it == null) {
+      // nothing saved for it: just take it off the screen
       setState(() {
-        pend.pending = false;
-        pend.failed = true;
-        pend.body = pend.body;
+        _msgs.remove(m);
+        _ids.remove(m.id);
       });
-      toast(context, r.msg);
+      if (m.type == 'text') _input.text = m.body ?? '';
+      return;
+    }
+    final item = it;
+    final again = await showModalBottomSheet<bool>(
+      context: context,
+      backgroundColor: C.card2,
+      builder: (_) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          ListTile(leading: Icon(Icons.refresh_rounded), title: Text('Send again'), onTap: () => Navigator.pop(context, true)),
+          ListTile(leading: Icon(Icons.delete_outline_rounded), title: Text('Delete'), onTap: () => Navigator.pop(context, false)),
+        ]),
+      ),
+    );
+    if (again == null || !mounted) return;
+    if (again) {
+      setState(() {
+        m.failed = false;
+        m.pending = true;
+      });
+      Outbox.retry(item);
+    } else {
+      _out.remove(item.cid);
+      setState(() {
+        _msgs.remove(m);
+        _ids.remove(m.id);
+      });
+      Outbox.discard(item);
     }
   }
 
@@ -388,13 +487,10 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
       _ids.add(pend.id);
     });
     _toBottom();
-    final r = await PcApi.upload(PcApi.room('send'), {'type': 'media', if (voice) 'voice': '1', if (voice) 'dur': '$dur', if (rep != null) 'reply': '${rep.id}', if (caption != null) 'body': caption}, [f]);
-    if (!mounted) return;
-    _finishSend(r, pend, () {
-      _msgs.remove(pend);
-      _ids.remove(pend.id);
-      _sendFile(f, voice: voice, dur: dur, caption: caption);
-    });
+    final it = await Outbox.addFile(PcApi.roomId, f, {'type': 'media', if (voice) 'voice': '1', if (voice) 'dur': '$dur', if (rep != null) 'reply': '${rep.id}', if (caption != null) 'body': caption});
+    pend.localPath = it.path ?? f.path;
+    _out[it.cid] = pend;
+    Outbox.pump();
   }
 
   Future<void> _attach() async {
@@ -812,15 +908,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
                             final newDay = i == 0 || dayLabel(list[i - 1].ts) != dayLabel(m.ts);
                             return Column(children: [
                               if (newDay && m.ts > 0) _DayChip(dayLabel(m.ts)),
-                              PcBubble(m: m, showDeleted: _showDeleted, onLongPress: () => _actions(m), onRetry: () {
-                                setState(() {
-                                  _msgs.remove(m);
-                                  _ids.remove(m.id);
-                                });
-                                if (m.type == 'text') {
-                                  _input.text = m.body ?? '';
-                                }
-                              }, onJump: (id) {}, onSwipeReply: () {
+                              PcBubble(m: m, showDeleted: _showDeleted, onLongPress: () => _actions(m), onRetry: () => _retryMsg(m), onJump: (id) {}, onSwipeReply: () {
                                 setState(() {
                                   _reply = m;
                                   _editing = null;
