@@ -88,9 +88,6 @@ class _BootState extends State<_Boot> {
     final started = DateTime.now();
     Widget next = const LoginScreen();
     try {
-      if (!Session.permsAsked) await Perms.askAll();
-    } catch (_) {}
-    try {
       final rt = Session.roomToken;
       final info = Session.roomInfo;
       if (rt != null && info != null) {
@@ -125,6 +122,15 @@ class _BootState extends State<_Boot> {
     ));
     Push.sync();
     Future.delayed(Duration(milliseconds: 700), Push.openPending);
+    // The permission questions come AFTER the first screen is shown (asking them while the splash waits made it hang until the app was reopened)
+    if (!Session.permsAsked) {
+      Future.delayed(Duration(milliseconds: 1200), () async {
+        try {
+          await Perms.askAll();
+        } catch (_) {}
+        Push.sync();
+      });
+    }
   }
 
   @override
