@@ -36,9 +36,7 @@ class Push {
         options: FirebaseOptions(apiKey: kFcmApiKey, appId: kFcmAppId, messagingSenderId: kFcmSenderId, projectId: kFcmProjectId),
       );
       final m = FirebaseMessaging.instance;
-      try {
-        await m.requestPermission(alert: true, badge: true, sound: true);
-      } catch (_) {}
+      // The notification permission is asked once by Perms.askAll (asking here as well made both requests wait for each other)
       _ready = true;
       _token = await m.getToken();
       m.onTokenRefresh.listen((t) {
