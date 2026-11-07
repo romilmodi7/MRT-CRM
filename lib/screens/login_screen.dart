@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../core/push.dart';
 
 import '../core/api.dart';
 import '../core/platform.dart';
@@ -78,6 +79,7 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
       final name = me is Map ? (me['name'] ?? me['username'] ?? u).toString() : u;
       await Session.save(d['token'].toString(), name);
       await Session.clearRoom();
+      Push.sync();
       if (!mounted) return;
       Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => ThreadsScreen()));
       return;
@@ -100,6 +102,7 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
         await Session.saveRoom(tok, d);
         PcApi.useGuest(tok);
         PcApi.roomId = ((d['room'] as Map)['id'] as num).toInt();
+        Push.sync();
         if (!mounted) return;
         Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => RoomChatScreen(info: d)));
         return;

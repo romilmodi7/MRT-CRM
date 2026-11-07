@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import '../core/push.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
@@ -65,6 +66,7 @@ class _ConversationScreenState extends State<ConversationScreen> with WidgetsBin
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    Push.here = 'chat:${widget.thread.id}';
     _load();
     _tick.start();
   }
@@ -72,6 +74,7 @@ class _ConversationScreenState extends State<ConversationScreen> with WidgetsBin
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    if (Push.here == 'chat:${widget.thread.id}') Push.here = '';
     _tick.stop();
     _input.dispose();
     _scroll.dispose();

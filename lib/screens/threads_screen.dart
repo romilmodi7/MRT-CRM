@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import '../core/push.dart';
 import 'package:flutter/services.dart';
 
 import '../core/api.dart';
@@ -147,6 +148,7 @@ class _ThreadsScreenState extends State<ThreadsScreen> with WidgetsBindingObserv
 
   Future<void> _logout() async {
     if (!await confirm(context, 'Log out of this phone?', yes: 'Log out')) return;
+    await Push.off();
     Api.post('logout');
     await Session.clearEmployee();
     PcApi.forget();
@@ -174,6 +176,7 @@ class _ThreadsScreenState extends State<ThreadsScreen> with WidgetsBindingObserv
                 IconButton(
                   onPressed: () async {
                     await Session.setMuted(!Session.muted);
+                    Push.sync();
                     if (mounted) {
                       setState(() {});
                       toast(context, Session.muted ? 'Message sound is off' : 'Message sound is on');

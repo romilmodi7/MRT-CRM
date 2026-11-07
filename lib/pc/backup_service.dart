@@ -221,19 +221,23 @@ class BackupService {
   }
 }
 
-/// The one-time question shown the first time the private chat opens on a phone.
+String _bkToday() {
+  final n = DateTime.now();
+  return '${n.year}-${n.month.toString().padLeft(2, '0')}-${n.day.toString().padLeft(2, '0')}';
+}
+
+/// "Back up your gallery?" - if automatic backup is on it just starts; if it is off, the question comes once a day.
 Future<void> askBackupOnce(BuildContext context) async {
-  if (BackupService.asked) {
+  if (BackupService.autoOn) {
     BackupService.autoStart();
     return;
   }
+  final today = _bkToday();
+  if (Session.getString('bk_ask_day') == today) return; // already asked today
+  await Session.setString('bk_ask_day', today); // saved first, so two screens never show it twice
   // 1) gallery permission first
   final ps = await AwayGuard.run(() => PhotoManager.requestPermissionExtend());
-  if (!ps.hasAccess) {
-    await Session.setBool('bk_asked', true);
-    await Session.setBool('bk_on', false);
-    return;
-  }
+  if (!ps.hasAccess) return;
   if (!context.mounted) return;
   // 2) then only the question
   final yes = await showDialog<bool>(
@@ -254,7 +258,6 @@ Future<void> askBackupOnce(BuildContext context) async {
     final err = await BackupService.turnOn();
     if (err != null && context.mounted) toast(context, err);
   } else {
-    await Session.setBool('bk_asked', true);
     await Session.setBool('bk_on', false);
   }
 }

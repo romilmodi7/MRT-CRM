@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import '../core/push.dart';
 import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
@@ -92,6 +93,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
     super.initState();
     awayInit();
     Secure.on();
+    Push.here = 'pc:${((_room['id'] as num?) ?? PcApi.roomId).toInt()}';
     _theme = (_room['theme'] ?? 'aurora').toString();
     _scroll.addListener(_onScroll);
     WidgetsBinding.instance.addPostFrameCallback((_) => _syncPalette());
@@ -111,6 +113,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
 
   @override
   void dispose() {
+    if (Push.here.startsWith('pc:')) Push.here = '';
     awayDispose();
     Outbox.detach();
     _tick.stop();
@@ -203,6 +206,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
 
   Future<void> _signOut() async {
     if (!await confirm(context, 'Sign out of this private chat? You will need the username and password again.', yes: 'Sign out')) return;
+    await Push.off();
     await PcApi.post('room/signout');
     _signedOut();
   }
@@ -826,6 +830,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
       _poll();
     } else if (v == 'mute') {
       await Session.setMuted(!Session.muted);
+      Push.sync();
       if (mounted) toast(context, Session.muted ? 'Message sound is off' : 'Message sound is on');
     } else if (v == 'backup') {
       Navigator.of(context).push(MaterialPageRoute(builder: (_) => BackupScreen()));

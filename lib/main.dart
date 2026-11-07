@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 
 import 'core/api.dart';
 import 'core/platform.dart';
+import 'core/push.dart';
 import 'core/session.dart';
 import 'core/theme.dart';
 import 'pc/room_chat_screen.dart';
@@ -24,6 +25,7 @@ Future<void> main() async {
     ThemeCtl.apply(WidgetsBinding.instance.platformDispatcher.platformBrightness);
     await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp, DeviceOrientation.portraitDown]);
     SystemChrome.setSystemUIOverlayStyle(SystemUiOverlayStyle(statusBarColor: Colors.transparent, statusBarIconBrightness: Brightness.light, systemNavigationBarColor: Color(0xFF0A1030)));
+    unawaited(Push.init().then((_) => Push.sync()));   // phone notifications (does nothing until the Firebase values are filled in)
     runApp(EmployeeChatApp());
   }, (e, s) {});
 }
@@ -58,6 +60,8 @@ class _EmployeeChatAppState extends State<EmployeeChatApp> with WidgetsBindingOb
       valueListenable: ThemeCtl.tick,
       builder: (_, __, ___) => MaterialApp(
         title: 'MRT CRM',
+        navigatorKey: Push.navKey,
+        scaffoldMessengerKey: Push.messengerKey,
         debugShowCheckedModeBanner: false,
         theme: appTheme(),
         home: const _Boot(),
@@ -119,6 +123,8 @@ class _BootState extends State<_Boot> {
       transitionsBuilder: (_, a, __, c) => FadeTransition(opacity: a, child: c),
       transitionDuration: Duration(milliseconds: 350),
     ));
+    Push.sync();
+    Future.delayed(Duration(milliseconds: 700), Push.openPending);
   }
 
   @override
