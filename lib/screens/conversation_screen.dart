@@ -13,6 +13,7 @@ import '../core/stickers.dart';
 import '../core/theme.dart';
 import '../core/util.dart';
 import '../core/widgets.dart';
+import 'project_share_screen.dart';
 import 'threads_screen.dart';
 
 class Attach {
@@ -27,7 +28,8 @@ class Msg {
   final String name, text, time, day;
   final bool edited;
   final List<Attach> files;
-  Msg(this.id, this.mine, this.name, this.text, this.time, this.day, this.edited, this.files);
+  final ShareCard? share;
+  Msg(this.id, this.mine, this.name, this.text, this.time, this.day, this.edited, this.files, {this.share});
 
   factory Msg.from(Map j) => Msg(
         (j['id'] as num?)?.toInt() ?? 0,
@@ -38,6 +40,7 @@ class Msg {
         (j['day'] ?? '').toString(),
         j['edited'] == true || j['edited'] == 1,
         ((j['attach'] as List?) ?? []).whereType<Map>().map((f) => Attach((f['id'] as num?)?.toInt() ?? 0, (f['name'] ?? 'file').toString(), (f['kind'] ?? 'file').toString(), (f['size'] ?? '').toString())).toList(),
+        share: ShareCard.from(j['share']),
       );
 }
 
@@ -139,15 +142,22 @@ class _ConversationScreenState extends State<ConversationScreen> with WidgetsBin
   }
 
   Future<void> _sticker() async {
-    final st = await pickSticker(context);
-    if (st == null || !mounted) return;
-    final r = await Api.post('chat/${widget.thread.id}', {'body': StickerMsg.encode(st)});
-    if (!mounted) return;
-    if (r.ok) {
-      _load();
-    } else {
-      toast(context, r.msg);
-    }
+    await showEmojiStickerSheet(
+      context,
+      onEmoji: (e) {
+        insertAtCursor(_input, e);
+        if (mounted) setState(() {});
+      },
+      onSticker: (st) async {
+        final r = await Api.post('chat/${widget.thread.id}', {'body': StickerMsg.encode(st)});
+        if (!mounted) return;
+        if (r.ok) {
+          _load();
+        } else {
+          toast(context, r.msg);
+        }
+      },
+    );
   }
 
   Future<void> _attach() async {
@@ -384,6 +394,7 @@ class _Bubble extends StatelessWidget {
                         ),
                       ),
               ),
+            if (m.share != null) ShareCardView(m.share!, mine: mine),
             if (m.text.isNotEmpty) LinkText(m.text, style: TextStyle(fontSize: 15.5, height: 1.3, color: mine ? Colors.white : CB.theirFg)),
             SizedBox(height: 3),
             Align(
