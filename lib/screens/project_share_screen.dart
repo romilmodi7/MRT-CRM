@@ -8,9 +8,9 @@ import '../core/theme.dart';
 /// A project shared in a chat (card in the bubble). Opens for anyone who is in that chat; no project right needed.
 class ShareCard {
   final int id;
-  final String project, code, client;
+  final String project, code, client, issue;
   final List<String> sections;
-  ShareCard(this.id, this.project, this.code, this.client, this.sections);
+  ShareCard(this.id, this.project, this.code, this.client, this.sections, {this.issue = ''});
 
   static ShareCard? from(dynamic j) {
     if (j is! Map) return null;
@@ -20,6 +20,7 @@ class ShareCard {
       (j['code'] ?? '').toString(),
       (j['client'] ?? '').toString(),
       ((j['sections'] as List?) ?? []).map((e) => e.toString()).toList(),
+      issue: (j['issue'] ?? '').toString(),
     );
   }
 }
@@ -32,18 +33,18 @@ class ShareCardView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final sub = [s.code, s.client].where((e) => e.isNotEmpty).join(' · ');
+    final sub = (s.issue.isNotEmpty ? [s.project] : [s.code, s.client]).where((e) => e.isNotEmpty).join(' · ');
     return Container(
       margin: EdgeInsets.only(bottom: 6),
       padding: EdgeInsets.all(12),
       decoration: BoxDecoration(color: C.dark ? Color(0x22FFFFFF) : Colors.white, borderRadius: BorderRadius.circular(16), border: Border.all(color: C.line)),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
         Row(children: [
-          Text('📁', style: TextStyle(fontSize: 26)),
+          Text(s.issue.isNotEmpty ? '🐞' : '📁', style: TextStyle(fontSize: 26)),
           SizedBox(width: 10),
           Expanded(
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(s.project, style: TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: C.text)),
+              Text(s.issue.isNotEmpty ? s.issue : s.project, style: TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: C.text)),
               if (sub.isNotEmpty) Text(sub, style: TextStyle(fontSize: 12, color: C.muted)),
             ]),
           ),
@@ -114,6 +115,19 @@ class _ProjectShareScreenState extends State<ProjectShareScreen> {
     final id = '$key:$i';
     final secret = kind == 'secret';
     final shown = _shown.contains(id);
+    if (kind == 'image') {
+      return Padding(
+        padding: EdgeInsets.symmetric(vertical: 8),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text((f['label'] ?? '').toString(), style: TextStyle(color: C.muted, fontSize: 13)),
+          SizedBox(height: 6),
+          GestureDetector(
+            onTap: () => openLink(v),
+            child: ClipRRect(borderRadius: BorderRadius.circular(12), child: Image.network(v, width: double.infinity, height: 200, fit: BoxFit.cover, errorBuilder: (_, __, ___) => Container(height: 60, color: C.g2, alignment: Alignment.center, child: Text('Open screenshot', style: TextStyle(color: C.accent2))))),
+          ),
+        ]),
+      );
+    }
     final link = kind == 'link' || kind == 'phone';
     final style = TextStyle(fontWeight: FontWeight.w700, fontSize: 14.5, color: link ? C.accent2 : C.text);
     return Padding(
@@ -195,7 +209,7 @@ class _ProjectShareScreenState extends State<ProjectShareScreen> {
   Widget build(BuildContext context) {
     final c = widget.card;
     return Scaffold(
-      appBar: AppBar(title: Text(c.project, maxLines: 1, overflow: TextOverflow.ellipsis)),
+      appBar: AppBar(title: Text(c.issue.isNotEmpty ? c.issue : c.project, maxLines: 1, overflow: TextOverflow.ellipsis)),
       body: _loading
           ? Center(child: CircularProgressIndicator(color: C.accent2))
           : _err.isNotEmpty
@@ -203,7 +217,7 @@ class _ProjectShareScreenState extends State<ProjectShareScreen> {
               : RefreshIndicator(
                   onRefresh: _load,
                   child: ListView(padding: EdgeInsets.fromLTRB(16, 8, 16, 28), children: [
-                    Text([c.code, c.client].where((e) => e.isNotEmpty).join(' · '), style: TextStyle(color: C.muted)),
+                    Text((c.issue.isNotEmpty ? [c.project] : [c.code, c.client]).where((e) => e.isNotEmpty).join(' · '), style: TextStyle(color: C.muted)),
                     SizedBox(height: 2),
                     Text('Shared by ${_d?['by'] ?? ''} · ${_d?['time'] ?? ''}  (live data)', style: TextStyle(color: C.hint, fontSize: 12)),
                     if ((_d?['note'] ?? '').toString().isNotEmpty) Padding(padding: EdgeInsets.only(top: 8), child: Text(_d!['note'].toString(), style: TextStyle(color: C.text))),
