@@ -10,7 +10,8 @@ class ShareCard {
   final int id;
   final String project, code, client, issue;
   final List<String> sections;
-  ShareCard(this.id, this.project, this.code, this.client, this.sections, {this.issue = ''});
+  final int level; // 0 High, 1 Medium, 2 Low, -1 none
+  ShareCard(this.id, this.project, this.code, this.client, this.sections, {this.issue = '', this.level = -1});
 
   static ShareCard? from(dynamic j) {
     if (j is! Map) return null;
@@ -21,9 +22,17 @@ class ShareCard {
       (j['client'] ?? '').toString(),
       ((j['sections'] as List?) ?? []).map((e) => e.toString()).toList(),
       issue: (j['issue'] ?? '').toString(),
+      level: (j['level'] is num) ? (j['level'] as num).toInt() : -1,
     );
   }
 }
+
+const _lvNames = ['High', 'Medium', 'Low'];
+const _lvColors = [Color(0xFFE0533D), Color(0xFFF59E0B), Color(0xFF16A34A)];
+Color? lvColor(int l) => (l >= 0 && l <= 2) ? _lvColors[l] : null;
+Widget lvBadge(int l) => lvColor(l) == null
+    ? SizedBox.shrink()
+    : Container(padding: EdgeInsets.symmetric(horizontal: 9, vertical: 2), decoration: BoxDecoration(color: lvColor(l), borderRadius: BorderRadius.circular(20)), child: Text(_lvNames[l], style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: Colors.white)));
 
 /// The card inside the chat bubble
 class ShareCardView extends StatelessWidget {
@@ -37,7 +46,7 @@ class ShareCardView extends StatelessWidget {
     return Container(
       margin: EdgeInsets.only(bottom: 6),
       padding: EdgeInsets.all(12),
-      decoration: BoxDecoration(color: C.dark ? Color(0x22FFFFFF) : Colors.white, borderRadius: BorderRadius.circular(16), border: Border.all(color: C.line)),
+      decoration: BoxDecoration(color: C.dark ? Color(0x22FFFFFF) : Colors.white, borderRadius: BorderRadius.circular(16), border: Border(left: BorderSide(color: lvColor(s.level) ?? C.line, width: lvColor(s.level) == null ? 1 : 5), top: BorderSide(color: C.line), right: BorderSide(color: C.line), bottom: BorderSide(color: C.line))),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
         Row(children: [
           Text(s.issue.isNotEmpty ? '🐞' : '📁', style: TextStyle(fontSize: 26)),
@@ -48,6 +57,7 @@ class ShareCardView extends StatelessWidget {
               if (sub.isNotEmpty) Text(sub, style: TextStyle(fontSize: 12, color: C.muted)),
             ]),
           ),
+          if (s.level >= 0) lvBadge(s.level),
         ]),
         SizedBox(height: 8),
         Wrap(spacing: 6, runSpacing: 4, children: [
@@ -152,13 +162,14 @@ class _ProjectShareScreenState extends State<ProjectShareScreen> {
     final chips = [r['priority'], (r['due'] ?? '').toString().isEmpty ? null : 'Due ${r['due']}', r['state'], r['category']].where((e) => e != null && e.toString().isNotEmpty).map((e) => e.toString()).toList();
     final team = ((r['team'] as List?) ?? []).map((e) => e.toString()).toList();
     final text = (r['text'] ?? '').toString();
+    final lv = (r['level'] is num) ? (r['level'] as num).toInt() : -1;
     return Container(
       margin: EdgeInsets.only(bottom: 10),
       padding: EdgeInsets.all(12),
-      decoration: BoxDecoration(color: C.g1, borderRadius: BorderRadius.circular(14), border: Border.all(color: C.line)),
+      decoration: BoxDecoration(color: C.g1, borderRadius: BorderRadius.circular(14), border: Border(left: BorderSide(color: lvColor(lv) ?? C.line, width: lvColor(lv) == null ? 1 : 5), top: BorderSide(color: C.line), right: BorderSide(color: C.line), bottom: BorderSide(color: C.line))),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Text((r['title'] ?? '').toString(), style: TextStyle(fontWeight: FontWeight.w800, fontSize: 14.5, color: C.text)),
-        if (chips.isNotEmpty) Padding(padding: EdgeInsets.only(top: 6), child: Wrap(spacing: 6, runSpacing: 4, children: [for (final c in chips) _chip(c)])),
+        if (chips.isNotEmpty) Padding(padding: EdgeInsets.only(top: 6), child: Wrap(spacing: 6, runSpacing: 4, children: [for (final c in chips) (lv >= 0 && c == (r['priority'] ?? '').toString()) ? lvBadge(lv) : _chip(c)])),
         if (text.isNotEmpty) Padding(padding: EdgeInsets.only(top: 6), child: Text(text, style: TextStyle(color: C.sub, fontSize: 13.5, height: 1.35))),
         if (team.isNotEmpty) Padding(padding: EdgeInsets.only(top: 6), child: Text('👥 ${team.join(', ')}', style: TextStyle(color: C.muted, fontSize: 12.5))),
       ]),
@@ -200,8 +211,8 @@ class _ProjectShareScreenState extends State<ProjectShareScreen> {
     final rows = ((_d?['data'] as Map?)?[k] as List?) ?? [];
     if (rows.isEmpty) return Padding(padding: EdgeInsets.all(24), child: Center(child: Text('Nothing added here.', style: TextStyle(color: C.muted))));
     final maps = rows.whereType<Map>().toList();
-    if (k == 'plan') return Column(children: [for (final r in maps) _plan(r)]);
-    if (k == 'issues' || k == 'points' || k == 'care') return Column(children: [for (final r in maps) _item(r)]);
+    if (k == 'plan' || k == 'plansel') return Column(children: [for (final r in maps) _plan(r)]);
+    if (k == 'issues' || k == 'issuesel' || k == 'points' || k == 'pointsel' || k == 'care' || k == 'caresel') return Column(children: [for (final r in maps) _item(r)]);
     return Column(children: [for (var i = 0; i < maps.length; i++) _field(k, i, maps[i])]);
   }
 
