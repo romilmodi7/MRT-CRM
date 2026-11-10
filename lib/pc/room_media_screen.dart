@@ -7,6 +7,7 @@ import '../core/platform.dart';
 import '../core/theme.dart';
 import '../core/util.dart';
 import '../core/widgets.dart';
+import 'pc_gallery.dart';
 import 'pc_models.dart';
 import 'pc_widgets.dart';
 
@@ -227,9 +228,13 @@ class _KindListState extends State<_KindList> with AutomaticKeepAliveClientMixin
 
   Widget _thumb(_Item it) {
     final m = it.m;
+    void openIt() {
+      final all = _items.map((e) => e.m).toList();
+      PcGallery.open(context, all, all.indexWhere((e) => e.id == m.id));
+    }
     if (m.type == 'video') {
       return GestureDetector(
-        onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => VideoPage(m: m))),
+        onTap: openIt,
         child: Container(
           decoration: BoxDecoration(gradient: LinearGradient(colors: [Color(0xFF1B1450), Color(0xFF0B0E22)], begin: Alignment.topLeft, end: Alignment.bottomRight), borderRadius: BorderRadius.circular(6)),
           child: Stack(alignment: Alignment.center, children: [
@@ -240,7 +245,7 @@ class _KindListState extends State<_KindList> with AutomaticKeepAliveClientMixin
       );
     }
     return GestureDetector(
-      onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => ImageViewerPage(cacheKey: 'p${m.id}', loader: () => mediaBytes(m.id), title: ''))),
+      onTap: openIt,
       child: AuthImage(cacheKey: 'p${m.id}', loader: () => mediaBytes(m.id), radius: BorderRadius.circular(6)),
     );
   }

@@ -15,6 +15,7 @@ import '../core/stickers.dart';
 import '../core/theme.dart';
 import '../core/util.dart';
 import '../core/widgets.dart';
+import 'pc_gallery.dart';
 import 'pc_models.dart';
 
 Future<Uint8List?> mediaBytes(int id) => PcApi.bytes(PcApi.room('media/$id'));
@@ -207,7 +208,7 @@ class PcBubble extends StatelessWidget {
         ? ClipRRect(borderRadius: BorderRadius.circular(14), child: Image.file(File(local), width: w, height: 200, fit: BoxFit.cover, errorBuilder: (_, __, ___) => SizedBox(width: w, height: 200)))
         : AuthImage(cacheKey: 'p${m.id}', loader: () => mediaBytes(m.id), width: w, height: 200, radius: BorderRadius.circular(14));
     return GestureDetector(
-      onTap: m.id < 0 ? null : () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => ImageViewerPage(cacheKey: 'p${m.id}', loader: () => mediaBytes(m.id), title: ''))),
+      onTap: m.id < 0 ? null : () => PcGallery.openFromChat(context, m),
       child: img,
     );
   }
@@ -215,7 +216,7 @@ class PcBubble extends StatelessWidget {
   static const double Widget_imageSize = 230;
 
   Widget _video(BuildContext context) => GestureDetector(
-        onTap: m.id < 0 ? null : () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => VideoPage(m: m))),
+        onTap: m.id < 0 ? null : () => PcGallery.openFromChat(context, m),
         child: Container(
           width: 230, height: 150,
           decoration: BoxDecoration(color: Color(0xFF0B0E22), borderRadius: BorderRadius.circular(14)),

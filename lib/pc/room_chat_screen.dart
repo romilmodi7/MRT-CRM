@@ -25,6 +25,7 @@ import 'backup_screen.dart';
 import 'backup_service.dart';
 import 'location_screen.dart';
 import 'outbox.dart';
+import 'pc_gallery.dart';
 import 'pc_models.dart';
 import 'pc_widgets.dart';
 import 'room_media_screen.dart';
@@ -83,7 +84,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
   // The owner's private chat locks after 10 minutes without touching the screen, or when the app is closed.
   DateTime _lastTouch = DateTime.now();
   late final Poller _idle = Poller(const Duration(seconds: 15), () async {
-    if (_owner && DateTime.now().difference(_lastTouch).inMinutes >= 10) _lock();
+    if (_owner && !AwayGuard.keepOpen && DateTime.now().difference(_lastTouch).inMinutes >= 10) _lock();
   });
   Map get _room => (widget.info['room'] as Map?) ?? {};
   String get _title => _owner ? (_room['title'] ?? '').toString() : (widget.info['peer_name'] ?? _room['title'] ?? '').toString();
@@ -94,6 +95,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
     super.initState();
     awayInit();
     Secure.on();
+    PcGallery.source = () => _msgs;
     Push.here = 'pc:${((_room['id'] as num?) ?? PcApi.roomId).toInt()}';
     _theme = (_room['theme'] ?? 'aurora').toString();
     _scroll.addListener(_onScroll);
@@ -117,6 +119,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
     if (Push.here.startsWith('pc:')) Push.here = '';
     awayDispose();
     Outbox.detach();
+    PcGallery.source = null;
     _tick.stop();
     _idle.stop();
     _recTimer?.cancel();
@@ -197,6 +200,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
   void _lock() {
     if (!mounted || _locked) return;
     _locked = true;
+    AwayGuard.keepOpen = false;
     _tick.stop();
     _idle.stop();
     PcApi.forget();
@@ -1008,6 +1012,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
             ),
           ]),
         ),
+        if (_owner) KeepOpenButton(onChanged: () => setState(() {})),
         if (_owner) IconButton(onPressed: _lock, icon: Icon(Icons.lock_outline_rounded, color: C.accent2)),
         IconButton(onPressed: _menu, icon: Icon(Icons.more_vert_rounded)),
       ]),

@@ -56,6 +56,7 @@ class _RoomsScreenState extends State<RoomsScreen> with WidgetsBindingObserver, 
   /// Lock = straight back to the employee chat list. The PIN is needed again.
   void _lock() {
     if (!mounted) return;
+    AwayGuard.keepOpen = false;
     PcApi.forget();
     MemCache.clear();
     wipePcTmp();
@@ -178,6 +179,7 @@ class _RoomsScreenState extends State<RoomsScreen> with WidgetsBindingObserver, 
           appBar: AppBar(
             title: Row(children: [Icon(Icons.lock_rounded, size: 20, color: C.accent2), SizedBox(width: 10), Text('Private chats', style: TextStyle(fontWeight: FontWeight.w800))]),
             actions: [
+              KeepOpenButton(onChanged: () => setState(() {})),
               TextButton.icon(onPressed: _lock, icon: Icon(Icons.lock_outline_rounded, size: 18), label: Text('Lock')),
             ],
           ),
