@@ -384,6 +384,9 @@ class Poller {
 
 /// While the app itself opens the camera / gallery / file picker / a permission box, leaving the app must NOT lock the private chat.
 class AwayGuard {
+  /// The owner's "Stay unlocked" switch: while it is on, switching apps, minimising or locking the phone does NOT close the private chat.
+  /// Kept in memory only: a closed app, a manual Lock or a server lock turns it off again.
+  static bool keepOpen = false;
   static int _holds = 0;
   static bool get holding => _holds > 0;
   static Future<R> run<R>(Future<R> Function() f) async {
@@ -407,9 +410,51 @@ mixin AwayLock<T extends StatefulWidget> on State<T>, WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState s) {
-    if ((s == AppLifecycleState.paused || s == AppLifecycleState.hidden) && !AwayGuard.holding) onAwayLock();
+    if ((s == AppLifecycleState.paused || s == AppLifecycleState.hidden) && !AwayGuard.holding && !AwayGuard.keepOpen) onAwayLock();
     onLifecycle(s);
   }
 
   void onLifecycle(AppLifecycleState s) {}
+}
+
+/// Header icon of the owner's private chat: "Stay unlocked".
+/// Off (default): the chat locks when you switch app, minimise or lock the phone, and the employee chat opens.
+/// On: it stays open through all of that until you turn it off, press Lock, or close the app.
+class KeepOpenButton extends StatefulWidget {
+  final VoidCallback? onChanged;
+  const KeepOpenButton({super.key, this.onChanged});
+  @override
+  State<KeepOpenButton> createState() => _KeepOpenButtonState();
+}
+
+class _KeepOpenButtonState extends State<KeepOpenButton> {
+  @override
+  Widget build(BuildContext context) {
+    final on = AwayGuard.keepOpen;
+    return Tooltip(
+      message: on ? 'Stay unlocked: ON' : 'Stay unlocked: OFF',
+      child: GestureDetector(
+        onTap: () {
+          setState(() => AwayGuard.keepOpen = !on);
+          widget.onChanged?.call();
+          toast(context, AwayGuard.keepOpen
+              ? 'Stay unlocked is ON. Private chat stays open when you switch apps or lock the phone.'
+              : 'Stay unlocked is OFF. Private chat locks when you leave the app.');
+        },
+        child: AnimatedContainer(
+          duration: Duration(milliseconds: 200),
+          width: 40,
+          height: 40,
+          margin: EdgeInsets.symmetric(horizontal: 2),
+          decoration: BoxDecoration(
+            gradient: on ? C.grad : null,
+            color: on ? null : Colors.transparent,
+            shape: BoxShape.circle,
+            boxShadow: on ? [BoxShadow(color: C.accent.withAlpha(90), blurRadius: 10, offset: Offset(0, 3))] : null,
+          ),
+          child: Icon(on ? Icons.phonelink_lock_rounded : Icons.phonelink_erase_rounded, size: 21, color: on ? Colors.white : C.accent2),
+        ),
+      ),
+    );
+  }
 }

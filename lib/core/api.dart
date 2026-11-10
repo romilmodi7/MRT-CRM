@@ -9,6 +9,7 @@ import 'package:mime/mime.dart';
 
 import 'config.dart';
 import 'session.dart';
+import 'widgets.dart' show AwayGuard;
 
 /// One answer from the server: {status, data, msg} (+ the HTTP code).
 class ApiRes {
@@ -157,6 +158,7 @@ class PcApi {
         'Accept': 'application/json',
         if (json) 'Content-Type': 'application/json',
         if (token != null) 'X-PC-Token': token!,
+        if (owner && AwayGuard.keepOpen) 'X-PC-Keep': '1',
       };
 
   static ApiRes _handle(http.Response r) {
