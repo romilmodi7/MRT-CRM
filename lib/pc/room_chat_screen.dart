@@ -27,6 +27,7 @@ import 'location_screen.dart';
 import 'outbox.dart';
 import 'pc_models.dart';
 import 'pc_widgets.dart';
+import 'room_media_screen.dart';
 
 /// One private room. Used by the owner (opened from the PIN door) and by a room user (signed in with username + password).
 class RoomChatScreen extends StatefulWidget {
@@ -761,6 +762,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           SizedBox(height: 8),
           _a(Icons.search_rounded, 'Search messages', 'search'),
+          _a(Icons.perm_media_rounded, 'Media, links and docs', 'media'),
           _a(Icons.palette_rounded, 'Chat background', 'theme'),
           _a(Icons.contrast_rounded, 'Light / Dark mode', 'mode'),
           if (_owner) _a(_showDeleted ? Icons.visibility_off_rounded : Icons.visibility_rounded, _showDeleted ? 'Hide deleted messages' : 'Show deleted messages', 'deleted'),
@@ -775,6 +777,8 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
     if (v == null || !mounted) return;
     if (v == 'search') {
       setState(() => _searchOn = true);
+    } else if (v == 'media') {
+      await Navigator.of(context).push(MaterialPageRoute(builder: (_) => RoomMediaScreen(title: _title, showDeleted: _owner && _showDeleted)));
     } else if (v == 'mode') {
       await showAppearanceSheet(context, onChanged: () => _setBg('auto'));
     } else if (v == 'theme') {
