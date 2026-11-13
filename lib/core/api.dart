@@ -11,6 +11,9 @@ import 'config.dart';
 import 'session.dart';
 import 'widgets.dart' show AwayGuard;
 
+/// A normal app identity. Dart's default ("Dart/3.x (dart:io)") is what server bot protection (Imunify360) blocks.
+const String kAppUserAgent = 'Mozilla/5.0 (Linux; Android 14; SM-S938B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Mobile Safari/537.36 MRTCRM/1.0';
+
 /// One answer from the server: {status, data, msg} (+ the HTTP code).
 class ApiRes {
   final int code;
@@ -63,7 +66,7 @@ class Api {
   static Map<String, String> _h({bool json = true}) {
     final t = Session.token;
     return {
-      'Accept': 'application/json',
+      'Accept': 'application/json', 'User-Agent': kAppUserAgent,
       if (json) 'Content-Type': 'application/json',
       if (t != null) 'Authorization': 'Bearer $t',
     };
@@ -96,7 +99,7 @@ class Api {
   /// Login has no token yet.
   static Future<ApiRes> login(String user, String pass, String? code) => _run(() => http.post(
         Uri.parse('${kApi}login'),
-        headers: {'Accept': 'application/json', 'Content-Type': 'application/json'},
+        headers: {'Accept': 'application/json', 'User-Agent': kAppUserAgent, 'Content-Type': 'application/json'},
         body: jsonEncode({'username': user, 'password': pass, if (code != null && code.isNotEmpty) 'code': code, 'device': 'Android app'}),
       ));
 
@@ -155,7 +158,7 @@ class PcApi {
   static String room(String p) => owner ? 'rooms/$roomId/api/$p' : 'room/api/$p';
 
   static Map<String, String> _h({bool json = true}) => {
-        'Accept': 'application/json',
+        'Accept': 'application/json', 'User-Agent': kAppUserAgent,
         if (json) 'Content-Type': 'application/json',
         if (token != null) 'X-PC-Token': token!,
         if (owner && AwayGuard.keepOpen) 'X-PC-Keep': '1',
@@ -190,7 +193,7 @@ class PcApi {
   /// Public: no token yet.
   static Future<ApiRes> roomLogin(String user, String pass) => _run(() => http.post(
         _u('room-login'),
-        headers: {'Accept': 'application/json', 'Content-Type': 'application/json'},
+        headers: {'Accept': 'application/json', 'User-Agent': kAppUserAgent, 'Content-Type': 'application/json'},
         body: jsonEncode({'username': user, 'password': pass}),
       ));
 
