@@ -831,6 +831,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
           Divider(color: C.g2),
           if (m.st != 'ghost') _a(Icons.reply_rounded, 'Reply', 'reply'),
           if (isText) _a(Icons.copy_rounded, 'Copy', 'copy'),
+          if (m.type == 'gif' && (m.gif ?? '').startsWith('https://') && m.st != 'ghost') _a(Icons.bookmark_add_rounded, 'Save GIF', 'savegif'),
           if (m.id > 0 && m.st != 'ghost') _a(_stars.contains(m.id) ? Icons.star_border_rounded : Icons.star_rounded, _stars.contains(m.id) ? 'Remove star' : 'Star', 'star'),
           if (canEdit) _a(Icons.edit_rounded, 'Edit', 'edit'),
           _a(Icons.push_pin_rounded, (_pin != null && _pin!['id'] == m.id) ? 'Unpin' : 'Pin', 'pin'),
@@ -851,6 +852,9 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
         _editing = null;
       });
       _focus.requestFocus();
+    } else if (action == 'savegif') {
+      final err = await PcGifs.save(m.gif ?? '');
+      if (mounted) toast(context, err ?? 'GIF saved. Find it under GIF → Saved.');
     } else if (action == 'copy') {
       await Clipboard.setData(ClipboardData(text: m.body ?? ''));
       if (mounted) toast(context, 'Copied');
@@ -1463,6 +1467,46 @@ class _DayChip extends StatelessWidget {
       );
 }
 
+/// Saved GIFs of the private chat (the owner has one list for all rooms, a guest one per room).
+/// Kept on the phone too, so the Saved tab opens at once.
+class PcGifs {
+  static List<Map> list = _read();
+  static String get _key => PcApi.owner ? 'pc_gifs_owner' : 'pc_gifs_${PcApi.roomId}';
+
+  static List<Map> _read() {
+    try {
+      return ((jsonDecode(Session.getString(PcApi.owner ? 'pc_gifs_owner' : 'pc_gifs_${PcApi.roomId}') ?? '[]') as List).whereType<Map>()).toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  static Future<String?> _take(ApiRes r) async {
+    if (!r.ok) return r.msg;
+    if (r.data is Map && (r.data as Map)['gifs'] is List) {
+      list = ((r.data as Map)['gifs'] as List).whereType<Map>().toList();
+      await Session.setString(_key, jsonEncode(list));
+    }
+    return null;
+  }
+
+  static Future<void> refresh() async {
+    list = _read();
+    await _take(await PcApi.get(PcApi.room('x/gifs')));
+  }
+
+  /// keep a GIF seen in the chat or in the search
+  static Future<String?> save(String url) async => _take(await PcApi.post(PcApi.room('x/gifs'), {'url': url}));
+
+  /// add a GIF from the phone
+  static Future<String?> upload(File f) async {
+    if (await f.length() > 8 * 1048576) return 'A GIF can be up to 8 MB.';
+    return _take(await PcApi.upload(PcApi.room('x/gifs'), {}, [f]));
+  }
+
+  static Future<String?> remove(int id) async => _take(await PcApi.post(PcApi.room('x/gifs/remove'), {'id': id}));
+}
+
 class _GifSheet extends StatefulWidget {
   const _GifSheet();
   @override
@@ -1483,6 +1527,8 @@ class _GifSheetState extends State<_GifSheet> {
   String _query = '';
   bool _adult = Session.getBool('gif_adult');
   static const _page = 30;
+  bool _saved = Session.getBool('gif_tab_saved');   // the tab used last time
+  bool _adding = false;
 
   @override
   void initState() {
@@ -1491,7 +1537,101 @@ class _GifSheetState extends State<_GifSheet> {
       if (_scroll.hasClients && _scroll.position.pixels > _scroll.position.maxScrollExtent - 400) _loadMore();
     });
     _go('');
+    PcGifs.refresh().then((_) {
+      if (mounted) setState(() {});
+    });
   }
+
+  void _tab(bool saved) {
+    setState(() => _saved = saved);
+    Session.setBool('gif_tab_saved', saved);
+  }
+
+  Future<void> _add() async {
+    if (_adding) return;
+    final r = await AwayGuard.run(() => FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['gif', 'webp']));
+    final path = (r == null || r.files.isEmpty) ? null : r.files.first.path;
+    if (path == null || !mounted) return;
+    setState(() => _adding = true);
+    final err = await PcGifs.upload(File(path));
+    if (!mounted) return;
+    setState(() => _adding = false);
+    toast(context, err ?? 'GIF added');
+  }
+
+  Future<void> _saveFromSearch(String url) async {
+    HapticFeedback.selectionClick();
+    final err = await PcGifs.save(url);
+    if (mounted) {
+      toast(context, err ?? 'Saved to your GIFs');
+      setState(() {});
+    }
+  }
+
+  Future<void> _remove(Map g) async {
+    final ok = await confirm(context, 'Remove this GIF from your saved GIFs?', yes: 'Remove');
+    if (!ok) return;
+    final err = await PcGifs.remove((g['id'] as num).toInt());
+    if (mounted) {
+      if (err != null) toast(context, err);
+      setState(() {});
+    }
+  }
+
+  Widget _savedGrid() {
+    final list = PcGifs.list;
+    return GridView.builder(
+      padding: EdgeInsets.fromLTRB(12, 0, 12, 12),
+      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 3, crossAxisSpacing: 6, mainAxisSpacing: 6),
+      itemCount: list.length + 1,
+      itemBuilder: (_, i) {
+        if (i == 0) {
+          return GestureDetector(
+            onTap: _add,
+            child: Container(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(colors: [C.accent.withAlpha(40), C.accent2.withAlpha(30)], begin: Alignment.topLeft, end: Alignment.bottomRight),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: C.accent.withAlpha(120)),
+              ),
+              child: Center(
+                child: _adding
+                    ? SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2, color: C.accent2))
+                    : Column(mainAxisSize: MainAxisSize.min, children: [
+                        Icon(Icons.add_photo_alternate_rounded, color: C.accent, size: 28),
+                        SizedBox(height: 4),
+                        Text('Add GIF', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 12, color: C.accent)),
+                      ]),
+              ),
+            ),
+          );
+        }
+        final g = list[i - 1];
+        return GestureDetector(
+          onTap: () => Navigator.pop(context, g['url'].toString()),
+          onLongPress: () => _remove(g),
+          child: ClipRRect(borderRadius: BorderRadius.circular(12), child: Image.network(g['url'].toString(), fit: BoxFit.cover, gaplessPlayback: true, errorBuilder: (_, __, ___) => Container(color: C.g2, child: Icon(Icons.broken_image_outlined, color: C.hint)))),
+        );
+      },
+    );
+  }
+
+  Widget _seg(String label, IconData ic, bool on, VoidCallback tap) => Expanded(
+        child: GestureDetector(
+          onTap: tap,
+          child: AnimatedContainer(
+            duration: Duration(milliseconds: 160),
+            height: 36,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(color: on ? C.accent : Colors.transparent, borderRadius: BorderRadius.circular(12)),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              Icon(ic, size: 17, color: on ? Colors.white : C.muted),
+              SizedBox(width: 6),
+              Text(label, style: TextStyle(fontWeight: FontWeight.w800, fontSize: 13, color: on ? Colors.white : C.muted)),
+            ]),
+          ),
+        ),
+      );
 
   Future<void> _toggleAdult() async {
     if (!_adult) {
@@ -1603,7 +1743,24 @@ class _GifSheetState extends State<_GifSheet> {
         height: MediaQuery.of(context).size.height * .6,
         child: Column(children: [
           Padding(
-            padding: EdgeInsets.fromLTRB(14, 14, 14, 8),
+            padding: EdgeInsets.fromLTRB(14, 14, 14, 0),
+            child: Container(
+              padding: EdgeInsets.all(3),
+              decoration: BoxDecoration(color: C.g1, borderRadius: BorderRadius.circular(15), border: Border.all(color: C.line)),
+              child: Row(children: [
+                _seg('Search', Icons.search_rounded, !_saved, () => _tab(false)),
+                _seg('Saved${PcGifs.list.isEmpty ? '' : ' · ${PcGifs.list.length}'}', Icons.bookmark_rounded, _saved, () => _tab(true)),
+              ]),
+            ),
+          ),
+          if (_saved)
+            Padding(
+              padding: EdgeInsets.fromLTRB(16, 10, 16, 8),
+              child: Text('Tap to send · hold to remove · + adds a GIF from your phone', style: TextStyle(fontSize: 11.5, color: C.muted)),
+            ),
+          if (_saved) Expanded(child: _savedGrid()),
+          if (!_saved) Padding(
+            padding: EdgeInsets.fromLTRB(14, 10, 14, 8),
             child: Row(children: [
               Expanded(child: TextField(controller: _q, onChanged: (v) => _deb.run(() => _go(v.trim())), decoration: InputDecoration(hintText: 'Search GIFs', prefixIcon: Icon(Icons.search_rounded, color: C.hint)))),
               SizedBox(width: 10),
@@ -1618,7 +1775,7 @@ class _GifSheetState extends State<_GifSheet> {
               ),
             ]),
           ),
-          Expanded(
+          if (!_saved) Expanded(
             child: _loading
                 ? Center(child: CircularProgressIndicator(color: C.accent2))
                 : _err.isNotEmpty
@@ -1634,6 +1791,7 @@ class _GifSheetState extends State<_GifSheet> {
                           }
                           return GestureDetector(
                             onTap: () => Navigator.pop(context, _items[i]['url'].toString()),
+                            onLongPress: () => _saveFromSearch(_items[i]['url'].toString()),
                             child: ClipRRect(borderRadius: BorderRadius.circular(10), child: Image.network(_items[i]['preview'].toString(), fit: BoxFit.cover, errorBuilder: (_, __, ___) => Container(color: C.g2))),
                           );
                         },
