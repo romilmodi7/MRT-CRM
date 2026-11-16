@@ -125,7 +125,9 @@ class _UpdateScreenState extends State<UpdateScreen> {
       if (!mounted) return;
       setState(() {
         _busy = false;
-        _msg = res.type == ResultType.done ? 'Tap "Install" on the next screen. If nothing opened, tap Install now.' : 'The installer could not be opened (${res.message}). Tap Install now to try again.';
+        _msg = res.type == ResultType.done
+            ? 'Tap "Install" on the next screen.\nIf Android says "App not installed": this phone has an older copy made with a different key. Uninstall MRT CRM once, then install it again from ${kApi}app/apk. Later updates install normally.'
+            : 'The installer could not be opened (${res.message}). Tap Install now to try again.';
       });
     } catch (_) {
       if (mounted) {
