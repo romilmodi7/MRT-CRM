@@ -45,9 +45,25 @@ jobs:
             }
           }
           EOF
+      - name: Same signing key for every build (needed so a new APK installs over the old one)
+        run: |
+          mkdir -p ~/.android
+          cp android_overlay/debug.keystore ~/.android/debug.keystore
       - run: flutter pub get
-      - run: flutter build apk --release
+      - name: Build (version = app_version.txt, e.g. 1.0.2; build number = the number of this run)
+        run: |
+          V=$(tr -d ' \r\n' < app_version.txt 2>/dev/null || true)
+          V=${V:-1.0.0}
+          echo "APP_VERSION=$V" >> $GITHUB_ENV
+          echo "Building version $V (build number ${{ github.run_number }})"
+          flutter build apk --release --build-number=${{ github.run_number }} --build-name=$V --dart-define=BUILD=${{ github.run_number }} --dart-define=VERSION=$V
+      - name: Files for the in-app update (upload both to storage/app/appupdate on the server)
+        run: |
+          mkdir -p update
+          cp build/app/outputs/flutter-apk/app-release.apk update/app.apk
+          printf '{\n  "code": %s,\n  "name": "%s",\n  "force": false,\n  "notes": "Bug fixes and improvements."\n}\n' "${{ github.run_number }}" "$APP_VERSION" > update/version.json
+          cat update/version.json
       - uses: actions/upload-artifact@v4
         with:
           name: mrt-crm-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
+          path: update
