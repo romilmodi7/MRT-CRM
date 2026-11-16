@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:lottie/lottie.dart';
 import 'package:path_provider/path_provider.dart';
@@ -114,11 +116,20 @@ class StickerView extends StatelessWidget {
 /// Sticker packs made in the CRM ("Chat stickers" screen). Team chat and private chat each keep their own list
 /// (private chat also gets the "private chat only" packs). The lists are kept on the phone and refreshed when the
 /// sticker panel opens; every sticker file is downloaded once and kept, so it also shows without internet.
+class _Job {
+  final int id;
+  final bool pc;
+  _Job(this.id, this.pc);
+}
+
 class StickerStore {
   static final Map<bool, List<StickerPack>> _packs = {false: _read(Session.getString('stk_packs')), true: _read(Session.getString('stk_packs_pc'))};
   static final Map<bool, DateTime> _at = {};
 
   static List<StickerPack> packs(bool pc) => _packs[pc] ?? const [];
+
+  /// goes up when a pack list changes (an open sticker panel redraws itself)
+  static final ValueNotifier<int> changed = ValueNotifier<int>(0);
 
   static List<StickerPack> _read(String? raw) {
     try {
@@ -151,7 +162,43 @@ class StickerStore {
       if (raw == Session.getString(key)) return;
       await Session.setString(key, raw);
       _packs[pc] = _read(raw);
+      changed.value++;
     } catch (_) {}
+  }
+
+  /* -------- quick loading: sticker files are fetched in the background, a few at a time, and kept on the phone */
+  static final List<_Job> _queue = [];
+  static final Set<int> _queued = {};
+  static int _running = 0;
+  static const int _parallel = 4;
+
+  /// Get these stickers ready (first ones first). Already kept stickers cost nothing.
+  static void prefetch(Iterable<Sticker> list, {bool pc = false, bool front = false}) {
+    final jobs = [for (final s in list) if (s.isImage && !_queued.contains(s.id)) _Job(s.id, pc)];
+    for (final j in jobs) {
+      _queued.add(j.id);
+    }
+    front ? _queue.insertAll(0, jobs) : _queue.addAll(jobs);
+    _pump();
+  }
+
+  /// The stickers of this pack go to the front of the line (the pack that was just opened).
+  static void prefetchPack(StickerPack p, {bool pc = false}) {
+    final ids = {for (final s in p.items) if (s.isImage) s.id};
+    _queue.removeWhere((j) => ids.contains(j.id));
+    _queued.removeAll(ids);
+    prefetch(p.items, pc: pc, front: true);
+  }
+
+  static void _pump() {
+    while (_running < _parallel && _queue.isNotEmpty) {
+      final j = _queue.removeAt(0);
+      _running++;
+      load(j.id, pc: j.pc).whenComplete(() {
+        _running--;
+        _pump();
+      });
+    }
   }
 
   static Future<File> file(int id) async {
@@ -165,13 +212,26 @@ class StickerStore {
   /// The file of a sticker: from the phone if it was loaded before, else from the server (and then kept).
   static Future<File?> load(int id, {bool pc = false}) => _loading[id] ??= _load(id, pc).whenComplete(() => _loading.remove(id));
 
+  static final Set<int> _have = {};
+  static String? _dir;
+
+  /// true when the sticker file is already on the phone (no waiting)
+  static bool has(int id) => _have.contains(id);
+
   static Future<File?> _load(int id, bool pc) async {
     try {
+      _dir ??= '${(await getApplicationSupportDirectory()).path}/stickers';
+      final quick = File('$_dir/$id.stk');
+      if (_have.contains(id)) return quick;
       final f = await file(id);
-      if (await f.exists() && await f.length() > 0) return f;
+      if (await f.exists() && await f.length() > 0) {
+        _have.add(id);
+        return f;
+      }
       final b = await (pc && PcApi.token != null ? PcApi.bytes(PcApi.room('x/sticker/$id')) : Api.bytes('sticker/$id'));
       if (b == null || b.isEmpty) return null;
       await f.writeAsBytes(b, flush: true);
+      _have.add(id);
       return f;
     } catch (_) {
       return null;
@@ -211,6 +271,8 @@ class _StickerWait extends StatelessWidget {
       );
 }
 
+Uint8List _gunzip(Uint8List b) => Uint8List.fromList(gzip.decode(b));
+
 /// Animated Telegram sticker: a .tgs file is a gzipped Lottie animation.
 class _TgsSticker extends StatefulWidget {
   final int id;
@@ -237,12 +299,12 @@ class _TgsStickerState extends State<_TgsSticker> {
     if (!mounted) return;
     try {
       if (b == null) throw 'none';
-      final j = Uint8List.fromList(gzip.decode(b));
+      final j = await compute(_gunzip, b);
       if (_json.length > 120) _json.remove(_json.keys.first);
       _json[widget.id] = j;
-      setState(() => _data = j);
+      if (mounted) setState(() => _data = j);
     } catch (_) {
-      setState(() => _failed = true);
+      if (mounted) setState(() => _failed = true);
     }
   }
 
@@ -264,6 +326,27 @@ class _VideoSticker extends StatefulWidget {
 }
 
 class _VideoStickerState extends State<_VideoSticker> {
+  // starting many video players at the same moment makes all of them slow: at most 3 start together
+  static int _starting = 0;
+  static final List<Completer<void>> _wait = [];
+  static Future<void> _slot() async {
+    if (_starting < 3) {
+      _starting++;
+      return;
+    }
+    final c = Completer<void>();
+    _wait.add(c);
+    await c.future;
+  }
+
+  static void _free() {
+    if (_wait.isNotEmpty) {
+      _wait.removeAt(0).complete();
+    } else {
+      _starting--;
+    }
+  }
+
   VideoPlayerController? _c;
   bool _failed = false;
 
@@ -280,6 +363,11 @@ class _VideoStickerState extends State<_VideoSticker> {
       setState(() => _failed = true);
       return;
     }
+    await _slot();
+    if (!mounted) {
+      _free();
+      return;
+    }
     try {
       final c = VideoPlayerController.file(f, videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true));
       await c.initialize();
@@ -293,6 +381,8 @@ class _VideoStickerState extends State<_VideoSticker> {
       setState(() => _c = c);
     } catch (_) {
       if (mounted) setState(() => _failed = true);
+    } finally {
+      _free();
     }
   }
 
@@ -310,7 +400,7 @@ class _VideoStickerState extends State<_VideoSticker> {
   }
 }
 
-// packs made in the CRM come first, in the order set there (Chat stickers → "Show first"); then the built-in ones
+// packs made in the CRM always come first, in the order set there (Chat stickers → "Show first"); then the built-in ones
 List<StickerPack> _allPacks(Map? roomPack, bool pc) => [
       ...StickerStore.packs(pc),
       ...kStickerPacks,
@@ -318,80 +408,161 @@ List<StickerPack> _allPacks(Map? roomPack, bool pc) => [
         for (final e in roomPack.entries) StickerPack(e.key.toString(), '⭐', [for (final x in (e.value as List)) Sticker(x.toString())]),
     ];
 
-/// Sticker keyboard. Returns the chosen sticker (or null).
+/// Called when a chat opens: the sticker list is refreshed and the first CRM pack is fetched in the background,
+/// so the sticker panel opens at once with its stickers ready.
+void warmStickers({bool pc = false}) {
+  StickerStore.refresh(pc: pc).whenComplete(() {
+    final list = StickerStore.packs(pc);
+    if (list.isNotEmpty) StickerStore.prefetch(list.first.items, pc: pc);
+  });
+}
+
+/// Sticker keyboard. Returns the chosen sticker (or null). Opens at once with the packs kept on the phone;
+/// the list is refreshed in the background.
 Future<Sticker?> pickSticker(BuildContext context, {Map? roomPack, bool pc = false}) async {
-  await StickerStore.refresh(pc: pc);
-  if (!context.mounted) return null;
-  final packs = _allPacks(roomPack, pc);
+  StickerStore.refresh(pc: pc);
   return showModalBottomSheet<Sticker>(
     context: context,
     isScrollControlled: true,
     backgroundColor: C.card2,
     shape: RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(26))),
-    builder: (_) => _StickerSheet(packs, pc: pc),
+    builder: (_) => _StickerSheet(roomPack: roomPack, pc: pc),
   );
 }
 
 class _StickerSheet extends StatefulWidget {
-  final List<StickerPack> packs;
+  final Map? roomPack;
   final void Function(Sticker)? onPick;
   final bool pc;
-  const _StickerSheet(this.packs, {this.onPick, this.pc = false});
+  const _StickerSheet({this.roomPack, this.onPick, this.pc = false});
   @override
   State<_StickerSheet> createState() => _StickerSheetState();
 }
 
 class _StickerSheetState extends State<_StickerSheet> {
   int _i = 0;
+  final _grid = ScrollController();
+
+  @override
+  void initState() {
+    super.initState();
+    StickerStore.changed.addListener(_onChange);
+    _warm();
+  }
+
+  @override
+  void dispose() {
+    StickerStore.changed.removeListener(_onChange);
+    _grid.dispose();
+    super.dispose();
+  }
+
+  void _onChange() {
+    if (mounted) setState(() {});
+    _warm();
+  }
+
+  List<StickerPack> get _packs => _allPacks(widget.roomPack, widget.pc);
+
+  void _warm() {
+    final p = _packs;
+    if (p.isEmpty) return;
+    StickerStore.prefetchPack(p[_i.clamp(0, p.length - 1)], pc: widget.pc);
+  }
+
+  void _open(int k) {
+    if (k == _i) return;
+    setState(() => _i = k);
+    if (_grid.hasClients) _grid.jumpTo(0);
+    _warm();
+  }
+
   @override
   Widget build(BuildContext context) {
-    final pack = widget.packs[_i.clamp(0, widget.packs.length - 1)];
+    final packs = _packs;
+    if (packs.isEmpty) return SizedBox.shrink();
+    final i = _i.clamp(0, packs.length - 1);
+    final pack = packs[i];
+    final crm = StickerStore.packs(widget.pc).length;
+    final w = MediaQuery.of(context).size.width;
+    final cols = w >= 600 ? 6 : (w >= 400 ? 4 : 3);
     return SafeArea(
       child: SizedBox(
         height: widget.onPick != null ? null : MediaQuery.of(context).size.height * .55,
         child: Column(children: [
-          SizedBox(height: widget.onPick != null ? 6 : 10),
-          if (widget.onPick == null) Container(width: 42, height: 4, decoration: BoxDecoration(color: C.g3, borderRadius: BorderRadius.circular(4))),
-          SizedBox(height: widget.onPick != null ? 4 : 12),
-          SizedBox(
-            height: 46,
-            child: ListView.separated(
+          if (widget.onPick == null) ...[
+            SizedBox(height: 10),
+            Container(width: 42, height: 4, decoration: BoxDecoration(color: C.g3, borderRadius: BorderRadius.circular(4))),
+            SizedBox(height: 8),
+          ],
+          // pack bar: small icon tabs like Telegram; the name of the open pack shows under it
+          Container(
+            height: 52,
+            margin: EdgeInsets.fromLTRB(10, 2, 10, 0),
+            decoration: BoxDecoration(color: C.g1, borderRadius: BorderRadius.circular(16), border: Border.all(color: C.line)),
+            child: ListView.builder(
               scrollDirection: Axis.horizontal,
-              padding: EdgeInsets.symmetric(horizontal: 14),
-              itemCount: widget.packs.length,
-              separatorBuilder: (_, __) => SizedBox(width: 8),
+              padding: EdgeInsets.symmetric(horizontal: 5, vertical: 5),
+              itemCount: packs.length,
               itemBuilder: (_, k) {
-                final sel = k == _i;
-                return GestureDetector(
-                  onTap: () => setState(() => _i = k),
-                  child: AnimatedContainer(
-                    duration: Duration(milliseconds: 180),
-                    padding: EdgeInsets.symmetric(horizontal: 14),
-                    alignment: Alignment.center,
-                    decoration: BoxDecoration(color: sel ? C.accent.withAlpha(46) : C.g1, borderRadius: BorderRadius.circular(22), border: Border.all(color: sel ? C.accent : C.line, width: sel ? 1.6 : 1)),
-                    child: Row(children: [Text(widget.packs[k].icon, style: TextStyle(fontSize: 18)), SizedBox(width: 6), Text(widget.packs[k].name, style: TextStyle(fontWeight: sel ? FontWeight.w800 : FontWeight.w600, color: C.text))]),
+                final sel = k == i;
+                final p = packs[k];
+                return Row(mainAxisSize: MainAxisSize.min, children: [
+                  // a thin line between the CRM packs and the built-in ones
+                  if (k == crm && crm > 0) Container(width: 1, height: 24, margin: EdgeInsets.symmetric(horizontal: 5), color: C.line),
+                  Tooltip(
+                    message: p.name,
+                    child: GestureDetector(
+                      onTap: () => _open(k),
+                      child: AnimatedContainer(
+                        duration: Duration(milliseconds: 160),
+                        width: 42,
+                        height: 42,
+                        margin: EdgeInsets.symmetric(horizontal: 2),
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          gradient: sel ? LinearGradient(colors: [C.accent.withAlpha(70), C.accent2.withAlpha(55)], begin: Alignment.topLeft, end: Alignment.bottomRight) : null,
+                          borderRadius: BorderRadius.circular(13),
+                          border: sel ? Border.all(color: C.accent, width: 1.4) : null,
+                        ),
+                        child: Text(p.icon, maxLines: 1, overflow: TextOverflow.clip, style: TextStyle(fontSize: sel ? 23 : 21, height: 1.1)),
+                      ),
+                    ),
                   ),
-                );
+                ]);
               },
             ),
           ),
+          Padding(
+            padding: EdgeInsets.fromLTRB(18, 8, 18, 0),
+            child: Row(children: [
+              Expanded(child: Text(pack.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: C.text))),
+              SizedBox(width: 8),
+              Text('${pack.items.length}', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: C.muted)),
+            ]),
+          ),
           Expanded(
             child: GridView.builder(
-              padding: EdgeInsets.all(14),
-              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 3, mainAxisSpacing: 10, crossAxisSpacing: 10, childAspectRatio: .95),
+              key: PageStorageKey('stk-$i'),
+              controller: _grid,
+              padding: EdgeInsets.fromLTRB(12, 8, 12, 12),
+              cacheExtent: 300,
+              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: cols, mainAxisSpacing: 8, crossAxisSpacing: 8),
               itemCount: pack.items.length,
               itemBuilder: (_, k) {
                 final s = pack.items[k];
-                return GestureDetector(
+                return InkWell(
+                  borderRadius: BorderRadius.circular(14),
                   onTap: () => widget.onPick != null ? widget.onPick!(s) : Navigator.pop(context, s),
                   child: Container(
-                    decoration: BoxDecoration(color: C.g1, borderRadius: BorderRadius.circular(18), border: Border.all(color: C.line)),
+                    decoration: BoxDecoration(color: C.g1.withAlpha(140), borderRadius: BorderRadius.circular(14)),
+                    padding: EdgeInsets.all(4),
                     child: s.isImage
-                        ? Padding(padding: EdgeInsets.all(6), child: StickerImage(s.id, kind: s.kind, pc: widget.pc, size: 100))
+                        ? StickerImage(s.id, kind: s.kind, pc: widget.pc, size: 88)
                         : Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-                      Text(s.e, style: TextStyle(fontSize: 38)),
-                      if (s.cap.isNotEmpty) Padding(padding: EdgeInsets.only(top: 4), child: Text(s.cap, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 11, color: C.muted))),
-                    ]),
+                            Text(s.e, style: TextStyle(fontSize: 32)),
+                            if (s.cap.isNotEmpty) Padding(padding: EdgeInsets.only(top: 2), child: Text(s.cap, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 10, color: C.muted))),
+                          ]),
                   ),
                 );
               },
@@ -475,9 +646,9 @@ class _EmojiPanelState extends State<_EmojiPanel> {
 
 /// Emoji keyboard + sticker packs in one sheet. Emojis go into the message box (the sheet stays open); a sticker is sent at once.
 Future<void> showEmojiStickerSheet(BuildContext context, {required void Function(String) onEmoji, required Future<void> Function(Sticker) onSticker, Map? roomPack, bool pc = false}) async {
-  await StickerStore.refresh(pc: pc);
-  if (!context.mounted) return;
-  final packs = _allPacks(roomPack, pc);
+  StickerStore.refresh(pc: pc);
+  // with packs from the CRM the panel opens on Stickers (the CRM packs always come first)
+  final first = StickerStore.packs(pc).isNotEmpty ? 1 : 0;
   return showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
@@ -488,6 +659,7 @@ Future<void> showEmojiStickerSheet(BuildContext context, {required void Function
         height: MediaQuery.of(sheetCtx).size.height * .5,
         child: DefaultTabController(
           length: 2,
+          initialIndex: first,
           child: Column(children: [
             SizedBox(height: 8),
             Container(width: 42, height: 4, decoration: BoxDecoration(color: C.g3, borderRadius: BorderRadius.circular(4))),
@@ -501,7 +673,7 @@ Future<void> showEmojiStickerSheet(BuildContext context, {required void Function
             Expanded(
               child: TabBarView(children: [
                 _EmojiPanel(onEmoji),
-                _StickerSheet(packs, pc: pc, onPick: (st) async {
+                _StickerSheet(roomPack: roomPack, pc: pc, onPick: (st) async {
                   Navigator.pop(sheetCtx);
                   await onSticker(st);
                 }),
