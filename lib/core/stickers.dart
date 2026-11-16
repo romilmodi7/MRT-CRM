@@ -310,9 +310,10 @@ class _VideoStickerState extends State<_VideoSticker> {
   }
 }
 
+// packs made in the CRM come first, in the order set there (Chat stickers → "Show first"); then the built-in ones
 List<StickerPack> _allPacks(Map? roomPack, bool pc) => [
-      ...kStickerPacks,
       ...StickerStore.packs(pc),
+      ...kStickerPacks,
       if (roomPack != null && roomPack.isNotEmpty)
         for (final e in roomPack.entries) StickerPack(e.key.toString(), '⭐', [for (final x in (e.value as List)) Sticker(x.toString())]),
     ];
