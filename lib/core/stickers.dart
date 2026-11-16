@@ -3,19 +3,23 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:lottie/lottie.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:video_player/video_player.dart';
 
 import 'api.dart';
 import 'session.dart';
 import 'theme.dart';
 import 'widgets.dart';
 
-/// One sticker = a big emoji with an optional short caption, or a picture made in the CRM (id > 0).
+/// One sticker = a big emoji with an optional short caption, or a sticker from a CRM pack (id > 0):
+/// a picture (img), an animated Telegram sticker (tgs) or a video sticker (webm).
 class Sticker {
   final String e;
   final String cap;
-  final int id;   // picture sticker from a CRM pack (0 = emoji sticker)
-  const Sticker(this.e, [this.cap = '', this.id = 0]);
+  final int id;      // sticker from a CRM pack (0 = emoji sticker)
+  final String kind; // img | tgs | webm
+  const Sticker(this.e, [this.cap = '', this.id = 0, this.kind = 'img']);
   bool get isImage => id > 0;
 }
 
@@ -60,15 +64,17 @@ const List<StickerPack> kStickerPacks = [
 class StickerMsg {
   static const _m = '⁣';
 
-  static String encode(Sticker s) => '$_m${s.isImage ? 'st:${s.id}' : s.e}${s.cap.isEmpty ? '' : '$_m${s.cap}'}';
+  static const _pre = {'img': 'st', 'tgs': 'sa', 'webm': 'sv'};
+
+  static String encode(Sticker s) => '$_m${s.isImage ? '${_pre[s.kind] ?? 'st'}:${s.id}' : s.e}${s.cap.isEmpty ? '' : '$_m${s.cap}'}';
 
   static Sticker? parse(String? t) {
     if (t == null || !t.startsWith(_m)) return null;
     final p = t.substring(1).split(_m);
     if (p.isEmpty || p[0].isEmpty || p[0].length > 16) return null;
     final cap = p.length > 1 ? p.sublist(1).join(' ') : '';
-    final img = RegExp(r'^st:(\d{1,9})$').firstMatch(p[0]);
-    if (img != null) return Sticker('', cap, int.parse(img.group(1)!));
+    final img = RegExp(r'^s([tav]):(\d{1,9})$').firstMatch(p[0]);
+    if (img != null) return Sticker('', cap, int.parse(img.group(2)!), {'a': 'tgs', 'v': 'webm'}[img.group(1)] ?? 'img');
     return Sticker(p[0], cap);
   }
 }
@@ -77,12 +83,13 @@ class StickerMsg {
 class StickerView extends StatelessWidget {
   final Sticker s;
   final bool mine;
-  const StickerView(this.s, {super.key, this.mine = false});
+  final bool pc;   // shown in the private chat (its stickers are loaded through the room)
+  const StickerView(this.s, {super.key, this.mine = false, this.pc = false});
   @override
   Widget build(BuildContext context) {
     if (s.isImage) {
       return Column(mainAxisSize: MainAxisSize.min, children: [
-        StickerImage(s.id, size: 140),
+        StickerImage(s.id, kind: s.kind, pc: pc, size: 150),
         if (s.cap.isNotEmpty) Padding(padding: EdgeInsets.only(top: 2), child: Text(s.cap, textAlign: TextAlign.center, style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800, color: C.text))),
       ]);
     }
@@ -104,11 +111,14 @@ class StickerView extends StatelessWidget {
   }
 }
 
-/// Sticker packs made in the CRM ("Chat stickers" screen). The list is kept on the phone and refreshed when the
-/// sticker panel opens; the pictures are downloaded once and kept, so they also show without internet.
+/// Sticker packs made in the CRM ("Chat stickers" screen). Team chat and private chat each keep their own list
+/// (private chat also gets the "private chat only" packs). The lists are kept on the phone and refreshed when the
+/// sticker panel opens; every sticker file is downloaded once and kept, so it also shows without internet.
 class StickerStore {
-  static List<StickerPack> packs = _read(Session.getString('stk_packs'));
-  static DateTime? _at;
+  static final Map<bool, List<StickerPack>> _packs = {false: _read(Session.getString('stk_packs')), true: _read(Session.getString('stk_packs_pc'))};
+  static final Map<bool, DateTime> _at = {};
+
+  static List<StickerPack> packs(bool pc) => _packs[pc] ?? const [];
 
   static List<StickerPack> _read(String? raw) {
     try {
@@ -117,7 +127,9 @@ class StickerStore {
         for (final p in ((j as Map)['packs'] as List).whereType<Map>())
           StickerPack((p['name'] ?? 'Pack').toString(), (p['icon'] ?? '⭐').toString(), [
             for (final s in ((p['items'] as List?) ?? const []).whereType<Map>())
-              s['img'] == true ? Sticker('', (s['cap'] ?? '').toString(), (s['id'] as num?)?.toInt() ?? 0) : Sticker((s['e'] ?? '').toString(), (s['cap'] ?? '').toString()),
+              s['img'] == true
+                  ? Sticker('', (s['cap'] ?? '').toString(), (s['id'] as num?)?.toInt() ?? 0, (s['k'] ?? 'img').toString())
+                  : Sticker((s['e'] ?? '').toString(), (s['cap'] ?? '').toString()),
           ]),
       ];
     } catch (_) {
@@ -125,76 +137,205 @@ class StickerStore {
     }
   }
 
-  static bool get _viaRoom => PcApi.token != null;
-
   /// Ask the server for the packs (at most once a minute).
-  static Future<void> refresh() async {
-    if (_at != null && DateTime.now().difference(_at!).inSeconds < 60) return;
+  static Future<void> refresh({bool pc = false}) async {
+    final last = _at[pc];
+    if (last != null && DateTime.now().difference(last).inSeconds < 60) return;
+    if (pc && PcApi.token == null) return;
     try {
-      final r = await (_viaRoom ? PcApi.get(PcApi.room('x/stickers')) : Api.get('stickers')).timeout(Duration(seconds: 6));
+      final r = await (pc ? PcApi.get(PcApi.room('x/stickers')) : Api.get('stickers')).timeout(Duration(seconds: 6));
       if (!r.ok || r.data is! Map) return;
-      _at = DateTime.now();
+      _at[pc] = DateTime.now();
+      final key = pc ? 'stk_packs_pc' : 'stk_packs';
       final raw = jsonEncode(r.data);
-      if (raw == Session.getString('stk_packs')) return;
-      await Session.setString('stk_packs', raw);
-      packs = _read(raw);
+      if (raw == Session.getString(key)) return;
+      await Session.setString(key, raw);
+      _packs[pc] = _read(raw);
     } catch (_) {}
   }
 
-  static Future<File> _file(int id) async {
+  static Future<File> file(int id) async {
     final d = Directory('${(await getApplicationSupportDirectory()).path}/stickers');
     if (!await d.exists()) await d.create(recursive: true);
-    return File('${d.path}/$id.img');
+    return File('${d.path}/$id.stk');
   }
 
-  /// The picture of a sticker: from the phone if it was loaded before, else from the server (and then kept).
-  static Future<Uint8List?> bytes(int id) async {
+  static final Map<int, Future<File?>> _loading = {};
+
+  /// The file of a sticker: from the phone if it was loaded before, else from the server (and then kept).
+  static Future<File?> load(int id, {bool pc = false}) => _loading[id] ??= _load(id, pc).whenComplete(() => _loading.remove(id));
+
+  static Future<File?> _load(int id, bool pc) async {
     try {
-      final f = await _file(id);
-      if (await f.exists() && await f.length() > 0) return await f.readAsBytes();
-      final b = await (_viaRoom ? PcApi.bytes(PcApi.room('x/sticker/$id')) : Api.bytes('sticker/$id'));
-      if (b != null && b.isNotEmpty) await f.writeAsBytes(b, flush: true);
-      return b;
+      final f = await file(id);
+      if (await f.exists() && await f.length() > 0) return f;
+      final b = await (pc && PcApi.token != null ? PcApi.bytes(PcApi.room('x/sticker/$id')) : Api.bytes('sticker/$id'));
+      if (b == null || b.isEmpty) return null;
+      await f.writeAsBytes(b, flush: true);
+      return f;
     } catch (_) {
       return null;
     }
   }
+
+  static Future<Uint8List?> bytes(int id, {bool pc = false}) async {
+    final f = await load(id, pc: pc);
+    return f == null ? null : f.readAsBytes();
+  }
 }
 
-/// A picture sticker (see-through background, so no bubble around it).
+/// A sticker from a CRM pack: a still picture, an animated Telegram sticker (Lottie) or a video sticker (loops, no sound).
+/// No bubble around it: stickers have a see-through background.
 class StickerImage extends StatelessWidget {
   final int id;
+  final String kind;
+  final bool pc;
   final double size;
-  const StickerImage(this.id, {super.key, this.size = 140});
+  const StickerImage(this.id, {super.key, this.kind = 'img', this.pc = false, this.size = 140});
   @override
-  Widget build(BuildContext context) => AuthImage(cacheKey: 'stk$id', loader: () => StickerStore.bytes(id), width: size, height: size, fit: BoxFit.contain);
+  Widget build(BuildContext context) {
+    if (kind == 'tgs') return SizedBox(width: size, height: size, child: _TgsSticker(id: id, pc: pc));
+    if (kind == 'webm') return SizedBox(width: size, height: size, child: _VideoSticker(id: id, pc: pc));
+    return AuthImage(cacheKey: 'stk$id', loader: () => StickerStore.bytes(id, pc: pc), width: size, height: size, fit: BoxFit.contain);
+  }
 }
 
-List<StickerPack> _allPacks(Map? roomPack) => [
+class _StickerWait extends StatelessWidget {
+  final bool failed;
+  const _StickerWait({this.failed = false});
+  @override
+  Widget build(BuildContext context) => Center(
+        child: failed
+            ? Icon(Icons.broken_image_outlined, color: C.hint)
+            : SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2, color: C.accent2)),
+      );
+}
+
+/// Animated Telegram sticker: a .tgs file is a gzipped Lottie animation.
+class _TgsSticker extends StatefulWidget {
+  final int id;
+  final bool pc;
+  const _TgsSticker({required this.id, required this.pc});
+  @override
+  State<_TgsSticker> createState() => _TgsStickerState();
+}
+
+class _TgsStickerState extends State<_TgsSticker> {
+  static final Map<int, Uint8List> _json = {};   // unpacked animations, so lists scroll smoothly
+  Uint8List? _data;
+  bool _failed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _data = _json[widget.id];
+    if (_data == null) _open();
+  }
+
+  Future<void> _open() async {
+    final b = await StickerStore.bytes(widget.id, pc: widget.pc);
+    if (!mounted) return;
+    try {
+      if (b == null) throw 'none';
+      final j = Uint8List.fromList(gzip.decode(b));
+      if (_json.length > 120) _json.remove(_json.keys.first);
+      _json[widget.id] = j;
+      setState(() => _data = j);
+    } catch (_) {
+      setState(() => _failed = true);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final d = _data;
+    if (d == null) return _StickerWait(failed: _failed);
+    return Lottie.memory(d, fit: BoxFit.contain, repeat: true, frameRate: FrameRate.max, errorBuilder: (_, __, ___) => _StickerWait(failed: true));
+  }
+}
+
+/// Video sticker (.webm): plays on a loop without sound.
+class _VideoSticker extends StatefulWidget {
+  final int id;
+  final bool pc;
+  const _VideoSticker({required this.id, required this.pc});
+  @override
+  State<_VideoSticker> createState() => _VideoStickerState();
+}
+
+class _VideoStickerState extends State<_VideoSticker> {
+  VideoPlayerController? _c;
+  bool _failed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _open();
+  }
+
+  Future<void> _open() async {
+    final f = await StickerStore.load(widget.id, pc: widget.pc);
+    if (!mounted) return;
+    if (f == null) {
+      setState(() => _failed = true);
+      return;
+    }
+    try {
+      final c = VideoPlayerController.file(f, videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true));
+      await c.initialize();
+      await c.setVolume(0);
+      await c.setLooping(true);
+      if (!mounted) {
+        c.dispose();
+        return;
+      }
+      await c.play();
+      setState(() => _c = c);
+    } catch (_) {
+      if (mounted) setState(() => _failed = true);
+    }
+  }
+
+  @override
+  void dispose() {
+    _c?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = _c;
+    if (c == null || !c.value.isInitialized) return _StickerWait(failed: _failed);
+    return FittedBox(fit: BoxFit.contain, child: SizedBox(width: c.value.size.width, height: c.value.size.height, child: VideoPlayer(c)));
+  }
+}
+
+List<StickerPack> _allPacks(Map? roomPack, bool pc) => [
       ...kStickerPacks,
-      ...StickerStore.packs,
+      ...StickerStore.packs(pc),
       if (roomPack != null && roomPack.isNotEmpty)
         for (final e in roomPack.entries) StickerPack(e.key.toString(), '⭐', [for (final x in (e.value as List)) Sticker(x.toString())]),
     ];
 
 /// Sticker keyboard. Returns the chosen sticker (or null).
-Future<Sticker?> pickSticker(BuildContext context, {Map? roomPack}) async {
-  await StickerStore.refresh();
+Future<Sticker?> pickSticker(BuildContext context, {Map? roomPack, bool pc = false}) async {
+  await StickerStore.refresh(pc: pc);
   if (!context.mounted) return null;
-  final packs = _allPacks(roomPack);
+  final packs = _allPacks(roomPack, pc);
   return showModalBottomSheet<Sticker>(
     context: context,
     isScrollControlled: true,
     backgroundColor: C.card2,
     shape: RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(26))),
-    builder: (_) => _StickerSheet(packs),
+    builder: (_) => _StickerSheet(packs, pc: pc),
   );
 }
 
 class _StickerSheet extends StatefulWidget {
   final List<StickerPack> packs;
   final void Function(Sticker)? onPick;
-  const _StickerSheet(this.packs, {this.onPick});
+  final bool pc;
+  const _StickerSheet(this.packs, {this.onPick, this.pc = false});
   @override
   State<_StickerSheet> createState() => _StickerSheetState();
 }
@@ -245,7 +386,7 @@ class _StickerSheetState extends State<_StickerSheet> {
                   child: Container(
                     decoration: BoxDecoration(color: C.g1, borderRadius: BorderRadius.circular(18), border: Border.all(color: C.line)),
                     child: s.isImage
-                        ? Padding(padding: EdgeInsets.all(8), child: StickerImage(s.id, size: 96))
+                        ? Padding(padding: EdgeInsets.all(6), child: StickerImage(s.id, kind: s.kind, pc: widget.pc, size: 100))
                         : Column(mainAxisAlignment: MainAxisAlignment.center, children: [
                       Text(s.e, style: TextStyle(fontSize: 38)),
                       if (s.cap.isNotEmpty) Padding(padding: EdgeInsets.only(top: 4), child: Text(s.cap, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 11, color: C.muted))),
@@ -332,10 +473,10 @@ class _EmojiPanelState extends State<_EmojiPanel> {
 }
 
 /// Emoji keyboard + sticker packs in one sheet. Emojis go into the message box (the sheet stays open); a sticker is sent at once.
-Future<void> showEmojiStickerSheet(BuildContext context, {required void Function(String) onEmoji, required Future<void> Function(Sticker) onSticker, Map? roomPack}) async {
-  await StickerStore.refresh();
+Future<void> showEmojiStickerSheet(BuildContext context, {required void Function(String) onEmoji, required Future<void> Function(Sticker) onSticker, Map? roomPack, bool pc = false}) async {
+  await StickerStore.refresh(pc: pc);
   if (!context.mounted) return;
-  final packs = _allPacks(roomPack);
+  final packs = _allPacks(roomPack, pc);
   return showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
@@ -359,7 +500,7 @@ Future<void> showEmojiStickerSheet(BuildContext context, {required void Function
             Expanded(
               child: TabBarView(children: [
                 _EmojiPanel(onEmoji),
-                _StickerSheet(packs, onPick: (st) async {
+                _StickerSheet(packs, pc: pc, onPick: (st) async {
                   Navigator.pop(sheetCtx);
                   await onSticker(st);
                 }),

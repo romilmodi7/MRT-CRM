@@ -66,7 +66,7 @@ class PcBubble extends StatelessWidget {
     }
     final stk = m.type == 'text' ? StickerMsg.parse(m.body) : null;
     if (stk != null) {
-      return _wrap(context, mine, child: Stack(children: [StickerView(stk, mine: mine), if (starred) Positioned(right: 4, top: 4, child: Icon(Icons.star_rounded, size: 16, color: Color(0xFFFFD54A)))]), bare: true, maxW: maxW);
+      return _wrap(context, mine, child: Stack(children: [StickerView(stk, mine: mine, pc: true), if (starred) Positioned(right: 4, top: 4, child: Icon(Icons.star_rounded, size: 16, color: Color(0xFFFFD54A)))]), bare: true, maxW: maxW);
     }
     if (m.type == 'gone') {
       return _wrap(context, mine, maxW: maxW, child: Row(mainAxisSize: MainAxisSize.min, children: [
