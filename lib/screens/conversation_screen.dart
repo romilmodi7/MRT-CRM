@@ -163,7 +163,7 @@ class _ConversationScreenState extends State<ConversationScreen> with WidgetsBin
       }
       final i = _msgs.indexWhere((m) => m.id == id);
       if (i < 0 || tries > 14) {
-        if (tries == 0) _toBottom(jump: true);
+        if (tries == 0) _settleBottom();
         return;
       }
       final max = _scroll.position.maxScrollExtent;
@@ -259,7 +259,7 @@ class _ConversationScreenState extends State<ConversationScreen> with WidgetsBin
           setState(() {});
           _goKey(_unreadKey, _unreadFrom!);
         } else {
-          _toBottom(jump: true);
+          _settleBottom();
         }
       } else if (stay) {
         _toBottom();
@@ -268,6 +268,19 @@ class _ConversationScreenState extends State<ConversationScreen> with WidgetsBin
       setState(() {});
     }
     _first = false;
+  }
+
+  /// Opening the chat: pictures and long messages get their real height a moment after the first frame, so one jump
+  /// lands short of the last message. Keep jumping to the end for a short while, until the person scrolls himself.
+  bool _userScrolled = false;
+  void _settleBottom() {
+    for (final ms in const [0, 80, 200, 400, 700, 1100, 1700, 2500]) {
+      Future.delayed(Duration(milliseconds: ms), () {
+        if (!mounted || _userScrolled || !_scroll.hasClients) return;
+        final max = _scroll.position.maxScrollExtent;
+        if (_scroll.position.pixels < max) _scroll.jumpTo(max);
+      });
+    }
   }
 
   void _toBottom({bool jump = false}) {
@@ -395,7 +408,12 @@ class _ConversationScreenState extends State<ConversationScreen> with WidgetsBin
           Expanded(
             child: _msgs.isEmpty
                 ? EmptyState(icon: Icons.waving_hand_rounded, title: 'Say hello', sub: 'Messages you send appear here')
-                : ListView.builder(
+                : NotificationListener<UserScrollNotification>(
+                    onNotification: (_) {
+                      _userScrolled = true;
+                      return false;
+                    },
+                    child: ListView.builder(
                     controller: _scroll,
                     padding: EdgeInsets.fromLTRB(12, 8, 12, 12),
                     itemCount: _msgs.length,
@@ -408,7 +426,7 @@ class _ConversationScreenState extends State<ConversationScreen> with WidgetsBin
                         _Bubble(m: m, starred: _stars.contains(m.id), onLongPress: () => _msgMenu(m), showName: !m.mine && m.name.isNotEmpty && (i == 0 || _msgs[i - 1].name != m.name || newDay)),
                       ]);
                     },
-                  ),
+                  )),
           ),
           if (_pending.isNotEmpty)
             GestureDetector(
