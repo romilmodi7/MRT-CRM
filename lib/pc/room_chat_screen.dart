@@ -111,6 +111,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
     awayInit();
     Secure.on();
     PcGallery.source = () => _msgs;
+    Future.delayed(Duration(milliseconds: 1500), () { if (mounted) warmStickers(pc: true); });   // stickers ready before the panel opens
     Push.here = 'pc:${((_room['id'] as num?) ?? PcApi.roomId).toInt()}';
     _theme = (_room['theme'] ?? 'aurora').toString();
     _scroll.addListener(_onScroll);
