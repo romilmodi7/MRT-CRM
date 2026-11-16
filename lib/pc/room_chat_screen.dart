@@ -707,6 +707,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
   Future<void> _emojis() async {
     await showEmojiStickerSheet(
       context,
+      pc: true,
       roomPack: widget.info['stickers'] is Map ? widget.info['stickers'] as Map : null,
       onEmoji: (e) {
         insertAtCursor(_input, e);
@@ -720,7 +721,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
   }
 
   Future<void> _stickers() async {
-    final st = await pickSticker(context, roomPack: widget.info['stickers'] is Map ? widget.info['stickers'] as Map : null);
+    final st = await pickSticker(context, pc: true, roomPack: widget.info['stickers'] is Map ? widget.info['stickers'] as Map : null);
     if (st == null || !mounted) return;
     final body = StickerMsg.encode(st);
     await _sendMsg({'type': 'text', 'body': body}, PcMsg(id: -(++_tmp), mine: true, ts: DateTime.now().millisecondsSinceEpoch ~/ 1000, tick: 0, type: 'text', body: body, pending: true));
@@ -912,6 +913,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
           _a(Session.muted ? Icons.notifications_off_rounded : Icons.notifications_active_rounded, Session.muted ? 'Sound is off - turn on' : 'Sound is on - turn off', 'mute'),
           _a(Icons.cloud_upload_rounded, 'Gallery backup', 'backup'),
           _a(Icons.my_location_rounded, 'Share live location', 'loc'),
+          if (_owner) _a(AwayGuard.keepOpen ? Icons.lock_open_rounded : Icons.phonelink_lock_rounded, AwayGuard.keepOpen ? 'Stay unlocked: ON (tap to turn off)' : 'Stay unlocked: OFF (tap to turn on)', 'keep'),
           if (_owner) _a(Icons.lock_rounded, 'Lock', 'lock') else _a(Icons.logout_rounded, 'Sign out', 'out', color: C.danger),
           SizedBox(height: 8),
         ]),
@@ -983,6 +985,9 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
       Navigator.of(context).push(MaterialPageRoute(builder: (_) => BackupScreen()));
     } else if (v == 'loc') {
       Navigator.of(context).push(MaterialPageRoute(builder: (_) => LocationScreen()));
+    } else if (v == 'keep') {
+      setState(() => AwayGuard.keepOpen = !AwayGuard.keepOpen);
+      toast(context, AwayGuard.keepOpen ? 'Stay unlocked is ON. Private chat stays open when you switch apps or lock the phone.' : 'Stay unlocked is OFF. Private chat locks when you leave the app.');
     } else if (v == 'lock') {
       _lock();
     } else if (v == 'out') {
@@ -1156,44 +1161,79 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
         ]),
       );
     }
+    final room = ((_room['id'] as num?) ?? PcApi.roomId).toInt();
+    final live = _peerOnline || _peerTyping;
     return Container(
       margin: EdgeInsets.fromLTRB(8, 4, 8, 6),
-      padding: EdgeInsets.fromLTRB(2, 4, 2, 4),
-      decoration: BoxDecoration(color: C.dark ? C.g1 : Colors.white, borderRadius: BorderRadius.circular(22), border: Border.all(color: C.line), boxShadow: C.dark ? [] : [BoxShadow(color: Color(0x14101828), blurRadius: 12, offset: Offset(0, 4))]),
+      padding: EdgeInsets.fromLTRB(0, 6, 6, 6),
+      decoration: BoxDecoration(
+        color: C.dark ? C.g1 : Colors.white,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: C.line),
+        boxShadow: C.dark ? [] : [BoxShadow(color: Color(0x14101828), blurRadius: 14, offset: Offset(0, 4))],
+      ),
       child: Row(children: [
-        IconButton(
-          onPressed: () => _owner ? Navigator.of(context).pop() : SystemNavigator.pop(),
-          icon: Icon(_owner ? Icons.arrow_back_rounded : Icons.close_rounded),
+        _HeadBtn(
+          icon: _owner ? Icons.arrow_back_rounded : Icons.close_rounded,
+          plain: true,
+          onTap: () => _owner ? Navigator.of(context).pop() : SystemNavigator.pop(),
         ),
-        GestureDetector(onTap: _openProfile, child: Stack(children: [
-          PcAvatar(name: _title, tag: _peerPhoto, size: 40),
-          Positioned(right: 0, bottom: 0, child: AnimatedContainer(duration: Duration(milliseconds: 300), width: 12, height: 12, decoration: BoxDecoration(shape: BoxShape.circle, color: _peerOnline ? C.success : C.hint, border: Border.all(color: C.dark ? Color(0xFF0B1030) : Colors.white, width: 2)))),
-        ])),
-        SizedBox(width: 12),
+        // photo + name + status: tap opens contact info
         Expanded(
-          child: GestureDetector(behavior: HitTestBehavior.opaque, onTap: _openProfile, child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(_title, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700)),
-            AnimatedSwitcher(
-              duration: Duration(milliseconds: 200),
-              child: Text(_status, key: ValueKey(_status), style: TextStyle(fontSize: 12, color: _peerOnline || _peerTyping ? C.success : C.muted)),
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(18),
+              onTap: _openProfile,
+              child: Padding(
+                padding: EdgeInsets.symmetric(vertical: 2, horizontal: 2),
+                child: Row(children: [
+                  Stack(clipBehavior: Clip.none, children: [
+                    PcAvatar(name: _title, tag: _peerPhoto, size: 42),
+                    Positioned(
+                      right: -1,
+                      bottom: -1,
+                      child: AnimatedContainer(
+                        duration: Duration(milliseconds: 300),
+                        width: 13,
+                        height: 13,
+                        decoration: BoxDecoration(shape: BoxShape.circle, color: _peerOnline ? C.success : C.hint, border: Border.all(color: C.dark ? C.g1 : Colors.white, width: 2.4)),
+                      ),
+                    ),
+                  ]),
+                  SizedBox(width: 10),
+                  Expanded(
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+                      Text(_title.isEmpty ? 'Private chat' : _title, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 16.5, fontWeight: FontWeight.w800, height: 1.15, letterSpacing: -.1)),
+                      SizedBox(height: 2),
+                      Row(children: [
+                        if (_owner && AwayGuard.keepOpen) Padding(padding: EdgeInsets.only(right: 4), child: Icon(Icons.lock_open_rounded, size: 12, color: C.accent2)),
+                        Flexible(
+                          child: AnimatedSwitcher(
+                            duration: Duration(milliseconds: 200),
+                            child: Text(
+                              _status.isEmpty ? 'tap for contact info' : _status,
+                              key: ValueKey(_status),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(fontSize: 12, height: 1.2, fontWeight: live ? FontWeight.w700 : FontWeight.w500, color: live ? C.success : C.muted),
+                            ),
+                          ),
+                        ),
+                      ]),
+                    ]),
+                  ),
+                ]),
+              ),
             ),
-          ])),
+          ),
         ),
-        IconButton(
-          tooltip: 'Voice call',
-          visualDensity: VisualDensity.compact,
-          onPressed: _active ? () => Calls.dial(context, pc: true, room: ((_room['id'] as num?) ?? PcApi.roomId).toInt(), name: _title) : null,
-          icon: Icon(Icons.call_rounded, color: _active ? C.success : C.hint),
-        ),
-        IconButton(
-          tooltip: 'Video call',
-          visualDensity: VisualDensity.compact,
-          onPressed: _active ? () => Calls.dial(context, pc: true, room: ((_room['id'] as num?) ?? PcApi.roomId).toInt(), name: _title, video: true) : null,
-          icon: Icon(Icons.videocam_rounded, color: _active ? C.accent2 : C.hint),
-        ),
-        if (_owner) KeepOpenButton(onChanged: () => setState(() {})),
-        if (_owner) IconButton(onPressed: _lock, icon: Icon(Icons.lock_outline_rounded, color: C.accent2)),
-        IconButton(onPressed: _menu, icon: Icon(Icons.more_vert_rounded)),
+        SizedBox(width: 4),
+        _HeadBtn(icon: Icons.call_rounded, tint: C.success, onTap: _active ? () => Calls.dial(context, pc: true, room: room, name: _title) : null),
+        SizedBox(width: 6),
+        _HeadBtn(icon: Icons.videocam_rounded, tint: C.accent2, onTap: _active ? () => Calls.dial(context, pc: true, room: room, name: _title, video: true) : null),
+        SizedBox(width: 2),
+        _HeadBtn(icon: Icons.more_vert_rounded, plain: true, onTap: _menu),
       ]),
     );
   }
@@ -1559,4 +1599,27 @@ class _UnreadLine extends StatelessWidget {
           Expanded(child: Container(height: 1, color: C.accent.withAlpha(90))),
         ]),
       );
+}
+
+/// Round button of the private chat's top bar: tinted (calls) or plain (back, menu). Greyed out when [onTap] is null.
+class _HeadBtn extends StatelessWidget {
+  final IconData icon;
+  final Color? tint;
+  final bool plain;
+  final VoidCallback? onTap;
+  const _HeadBtn({required this.icon, this.tint, this.plain = false, this.onTap});
+  @override
+  Widget build(BuildContext context) {
+    final off = onTap == null;
+    final c = off ? C.hint : (tint ?? C.text);
+    return Material(
+      color: plain ? Colors.transparent : c.withAlpha(C.dark ? 40 : 26),
+      shape: CircleBorder(),
+      child: InkWell(
+        customBorder: CircleBorder(),
+        onTap: onTap,
+        child: SizedBox(width: plain ? 40 : 38, height: plain ? 40 : 38, child: Icon(icon, size: plain ? 23 : 20, color: c)),
+      ),
+    );
+  }
 }
