@@ -82,6 +82,7 @@ class _ConversationScreenState extends State<ConversationScreen> with WidgetsBin
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     Push.here = 'chat:${widget.thread.id}';
+    Future.delayed(Duration(milliseconds: 1500), () { if (mounted) warmStickers(pc: false); });   // stickers ready before the panel opens
     _scroll.addListener(() {
       if (_scroll.hasClients) _stick = _scroll.position.maxScrollExtent - _scroll.position.pixels < 160;
     });
