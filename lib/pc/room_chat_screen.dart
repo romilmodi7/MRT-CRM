@@ -299,7 +299,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
       final list = _shown;
       final i = list.indexWhere((m) => m.id == id);
       if (i < 0 || tries > 14) {
-        if (tries == 0) _toBottom(jump: true);
+        if (tries == 0) _settleBottom();
         return;
       }
       final max = _scroll.position.maxScrollExtent;
@@ -410,7 +410,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
         setState(() {});
         _goKey(_unreadKey, _unreadFrom!);
       } else {
-        _toBottom(jump: true);
+        _settleBottom();
       }
     } else if (added && (_nearBottom() || typing)) {
       _toBottom();
@@ -421,6 +421,19 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
   }
 
   bool _nearBottom() => !_scroll.hasClients || _scroll.position.maxScrollExtent - _scroll.position.pixels < 160;
+
+  /// Opening the chat: pictures and long messages get their real height a moment after the first frame, so one jump
+  /// lands short of the last message. Keep jumping to the end for a short while, until the person scrolls himself.
+  bool _userScrolled = false;
+  void _settleBottom() {
+    for (final ms in const [0, 80, 200, 400, 700, 1100, 1700, 2500]) {
+      Future.delayed(Duration(milliseconds: ms), () {
+        if (!mounted || _userScrolled || !_scroll.hasClients) return;
+        final max = _scroll.position.maxScrollExtent;
+        if (_scroll.position.pixels < max) _scroll.jumpTo(max);
+      });
+    }
+  }
 
   void _toBottom({bool jump = false}) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -886,7 +899,29 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
     }
   }
 
-  Widget _a(IconData i, String t, String v, {Color? color}) => ListTile(dense: true, leading: Icon(i, color: color ?? C.accent2), title: Text(t, style: TextStyle(color: color ?? C.text)), onTap: () => Navigator.pop(context, v));
+  /// One row of a menu: a tinted icon tile, the name, an optional second line and an optional on/off switch.
+  Widget _a(IconData i, String t, String v, {Color? color, String? sub, bool? on}) => InkWell(
+        onTap: () => Navigator.pop(context, v),
+        child: Padding(
+          padding: EdgeInsets.symmetric(horizontal: 16, vertical: 7),
+          child: Row(children: [
+            Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(color: (color ?? C.accent2).withAlpha(C.dark ? 46 : 30), borderRadius: BorderRadius.circular(13)),
+              child: Icon(i, size: 21, color: color ?? C.accent2),
+            ),
+            SizedBox(width: 14),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+                Text(t, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: color ?? C.text)),
+                if (sub != null) Text(sub, style: TextStyle(fontSize: 12, color: C.muted)),
+              ]),
+            ),
+            if (on != null) IgnorePointer(child: Switch(value: on, onChanged: (_) {}, activeThumbColor: Colors.white, activeTrackColor: C.accent)),
+          ]),
+        ),
+      );
 
   // ------------------------------------------------------------------ search / menu
 
@@ -911,25 +946,70 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
   }
 
   Future<void> _menu() async {
+    Widget sec(String t) => Padding(padding: EdgeInsets.fromLTRB(20, 14, 20, 6), child: Text(t, style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w800, letterSpacing: 1.2, color: C.muted)));
     final v = await showModalBottomSheet<String>(
       context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
       backgroundColor: C.card2,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(26))),
-      builder: (_) => SafeArea(
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          SizedBox(height: 8),
-          _a(Icons.search_rounded, 'Search messages', 'search'),
-          _a(Icons.perm_media_rounded, 'Media, links and docs', 'media'),
-          _a(Icons.palette_rounded, 'Chat background', 'theme'),
-          _a(Icons.contrast_rounded, 'Light / Dark mode', 'mode'),
-          if (_owner) _a(_showDeleted ? Icons.visibility_off_rounded : Icons.visibility_rounded, _showDeleted ? 'Hide deleted messages' : 'Show deleted messages', 'deleted'),
-          _a(Session.muted ? Icons.notifications_off_rounded : Icons.notifications_active_rounded, Session.muted ? 'Sound is off - turn on' : 'Sound is on - turn off', 'mute'),
-          _a(Icons.cloud_upload_rounded, 'Gallery backup', 'backup'),
-          _a(Icons.my_location_rounded, 'Share live location', 'loc'),
-          if (_owner) _a(AwayGuard.keepOpen ? Icons.lock_open_rounded : Icons.phonelink_lock_rounded, AwayGuard.keepOpen ? 'Stay unlocked: ON (tap to turn off)' : 'Stay unlocked: OFF (tap to turn on)', 'keep'),
-          if (_owner) _a(Icons.lock_rounded, 'Lock', 'lock') else _a(Icons.logout_rounded, 'Sign out', 'out', color: C.danger),
-          SizedBox(height: 8),
-        ]),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
+      builder: (ctx) => ConstrainedBox(
+        constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * .86),
+        child: SafeArea(
+          top: false,
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            SizedBox(height: 10),
+            Container(width: 42, height: 4, decoration: BoxDecoration(color: C.g3, borderRadius: BorderRadius.circular(4))),
+            Padding(
+              padding: EdgeInsets.fromLTRB(20, 14, 20, 2),
+              child: Row(children: [
+                PcAvatar(name: _title, tag: _peerPhoto, size: 40),
+                SizedBox(width: 12),
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(_title.isEmpty ? 'Private chat' : _title, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800)),
+                  Text('Chat options', style: TextStyle(fontSize: 12.5, color: C.muted)),
+                ])),
+              ]),
+            ),
+            Flexible(
+              child: SingleChildScrollView(
+                padding: EdgeInsets.only(bottom: 10),
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  sec('THIS CHAT'),
+                  _a(Icons.search_rounded, 'Search messages', 'search'),
+                  _a(Icons.perm_media_rounded, 'Media, links and docs', 'media'),
+                  _a(Icons.palette_rounded, 'Chat background', 'theme'),
+                  _a(Icons.contrast_rounded, 'Light / Dark mode', 'mode'),
+                  if (_owner) _a(_showDeleted ? Icons.visibility_off_rounded : Icons.visibility_rounded, _showDeleted ? 'Hide deleted messages' : 'Show deleted messages', 'deleted'),
+                  sec('MORE'),
+                  _a(Session.muted ? Icons.notifications_off_rounded : Icons.notifications_active_rounded, Session.muted ? 'Sound is off' : 'Sound is on', 'mute', sub: Session.muted ? 'Tap to turn the message sound on' : 'Tap to turn the message sound off'),
+                  _a(Icons.cloud_upload_rounded, 'Gallery backup', 'backup'),
+                  _a(Icons.my_location_rounded, 'Share live location', 'loc'),
+                  sec('PRIVACY'),
+                  if (_owner) _a(AwayGuard.keepOpen ? Icons.lock_open_rounded : Icons.phonelink_lock_rounded, 'Stay unlocked', 'keep', sub: AwayGuard.keepOpen ? 'ON: stays open when you switch apps' : 'OFF: locks when you leave the app', on: AwayGuard.keepOpen),
+                  Padding(
+                    padding: EdgeInsets.fromLTRB(16, 10, 16, 4),
+                    child: SizedBox(
+                      width: double.infinity,
+                      height: 50,
+                      child: ElevatedButton.icon(
+                        onPressed: () => Navigator.pop(ctx, _owner ? 'lock' : 'out'),
+                        icon: Icon(_owner ? Icons.lock_rounded : Icons.logout_rounded, size: 20),
+                        label: Text(_owner ? 'Lock private chat' : 'Sign out', style: TextStyle(fontSize: 15.5, fontWeight: FontWeight.w800)),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: _owner ? C.accent : C.danger,
+                          foregroundColor: Colors.white,
+                          elevation: 0,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                        ),
+                      ),
+                    ),
+                  ),
+                ]),
+              ),
+            ),
+          ]),
+        ),
       ),
     );
     if (v == null || !mounted) return;
@@ -1091,6 +1171,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
                 child: Stack(children: [
                   Positioned.fill(child: NotificationListener<ScrollNotification>(
                   onNotification: (n) {
+                    if (n is UserScrollNotification) _userScrolled = true;
                     if (n is ScrollUpdateNotification && _scroll.hasClients && _scroll.position.pixels < 140) _loadOlder();
                     return false;
                   },
