@@ -20,13 +20,13 @@ class PcAvatar extends StatelessWidget {
   final double size;
   const PcAvatar({super.key, required this.name, required this.tag, this.mine = false, this.size = 40});
 
-  static String key(String tag, bool mine) => 'pcph${mine ? 'm' : 'p'}${PcApi.roomId}$tag';
+  static String photoKey(String tag, bool mine) => 'pcph${mine ? 'm' : 'p'}${PcApi.roomId}$tag';
 
   @override
   Widget build(BuildContext context) {
     if (tag.isEmpty) return Avatar(name, size: size);
     return ClipOval(
-      child: AuthImage(key: ValueKey(key(tag, mine)), cacheKey: key(tag, mine), loader: () => PcApi.bytes(PcApi.room('x/photo/${mine ? 'me' : 'peer'}')), width: size, height: size),
+      child: AuthImage(key: ValueKey(photoKey(tag, mine)), cacheKey: photoKey(tag, mine), loader: () => PcApi.bytes(PcApi.room('x/photo/${mine ? 'me' : 'peer'}')), width: size, height: size),
     );
   }
 }
@@ -128,7 +128,7 @@ class _PcProfileScreenState extends State<PcProfileScreen> {
             child: GestureDetector(
               onTap: widget.peerTag.isEmpty
                   ? null
-                  : () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => ImageViewerPage(cacheKey: '${PcAvatar.key(widget.peerTag, false)}full', loader: () => PcApi.bytes(PcApi.room('x/photo/peer')), title: widget.name))),
+                  : () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => ImageViewerPage(cacheKey: '${PcAvatar.photoKey(widget.peerTag, false)}full', loader: () => PcApi.bytes(PcApi.room('x/photo/peer')), title: widget.name))),
               child: PcAvatar(name: widget.name, tag: widget.peerTag, size: 132),
             ),
           ),
