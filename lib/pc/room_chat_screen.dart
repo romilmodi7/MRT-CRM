@@ -310,18 +310,31 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
   }
 
   /// Show one message of this chat (from the starred list).
-  void _jumpTo(int id) {
+  /// Show one message of this chat (a replied-to message, or one from the starred list) and light it up for a moment.
+  /// An older message that is not loaded yet is fetched first (page by page).
+  Future<void> _jumpTo(int id) async {
+    var tries = 0;
+    if (_msgs.indexWhere((m) => m.id == id) < 0 && _more) toast(context, 'Finding the message…');
+    while (_msgs.indexWhere((m) => m.id == id) < 0 && _more && tries < 25 && mounted) {
+      tries++;
+      while (_loadingOld) {
+        await Future.delayed(Duration(milliseconds: 80));
+      }
+      await _loadOlder();
+    }
+    if (!mounted) return;
     if (_msgs.indexWhere((m) => m.id == id) < 0) {
-      toast(context, 'That message is older. Scroll up to load it.');
+      toast(context, 'That message is no longer in this chat.');
       return;
     }
+    HapticFeedback.selectionClick();
     setState(() {
       _hits = {};
       _searchOn = false;
       _jumpId = id;
     });
     _goKey(_jumpKey, id);
-    Future.delayed(Duration(seconds: 3), () {
+    Future.delayed(Duration(milliseconds: 2200), () {
       if (mounted && _jumpId == id) setState(() => _jumpId = null);
     });
   }
@@ -1090,16 +1103,24 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
                           itemBuilder: (_, i) {
                             final m = list[i];
                             final newDay = i == 0 || dayLabel(list[i - 1].ts) != dayLabel(m.ts);
-                            return Column(key: m.id == _jumpId ? _jumpKey : null, children: [
+                            final lit = m.id == _jumpId;
+                            return Column(key: lit ? _jumpKey : null, children: [
                               if (newDay && m.ts > 0) _DayChip(dayLabel(m.ts)),
                               if (m.id == _unreadFrom && _hits.isEmpty) _UnreadLine(key: _unreadKey, count: _openUnread),
-                              PcBubble(m: m, showDeleted: _showDeleted, starred: _stars.contains(m.id), onLongPress: () => _actions(m), onRetry: () => _retryMsg(m), onJump: (id) {}, onSwipeReply: () {
-                                setState(() {
-                                  _reply = m;
-                                  _editing = null;
-                                });
-                                _focus.requestFocus();
-                              }),
+                              // the message a reply points to lights up for a moment after tapping the quote
+                              AnimatedContainer(
+                                duration: Duration(milliseconds: 450),
+                                curve: Curves.easeOut,
+                                padding: EdgeInsets.symmetric(horizontal: 4),
+                                decoration: BoxDecoration(color: lit ? C.accent.withAlpha(C.dark ? 70 : 45) : Colors.transparent, borderRadius: BorderRadius.circular(16)),
+                                child: PcBubble(m: m, showDeleted: _showDeleted, starred: _stars.contains(m.id), onLongPress: () => _actions(m), onRetry: () => _retryMsg(m), onJump: (id) => _jumpTo(id), onSwipeReply: () {
+                                  setState(() {
+                                    _reply = m;
+                                    _editing = null;
+                                  });
+                                  _focus.requestFocus();
+                                }),
+                              ),
                             ]);
                           },
                         ),
