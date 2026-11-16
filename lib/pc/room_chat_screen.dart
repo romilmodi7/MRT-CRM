@@ -12,6 +12,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:record/record.dart';
 
 import '../core/api.dart';
+import '../core/call.dart';
 import '../core/appearance.dart';
 import '../core/config.dart';
 import '../core/platform.dart';
@@ -27,6 +28,7 @@ import 'location_screen.dart';
 import 'outbox.dart';
 import 'pc_gallery.dart';
 import 'pc_models.dart';
+import 'pc_profile.dart';
 import 'pc_widgets.dart';
 import 'room_media_screen.dart';
 
@@ -58,6 +60,19 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
   String? _localBg = Session.getString('pc_bg');
   bool _showFab = false;
   int _unseen = 0;
+
+  // opening at the first unread message, keeping the last message above the keyboard
+  int _openUnread = 0;                 // unread messages when the chat was opened
+  int? _unreadFrom;                    // id of the first unread message (the "unread" line sits above it)
+  final _unreadKey = GlobalKey();
+  int? _jumpId;                        // a starred message to show
+  final _jumpKey = GlobalKey();
+  bool _stick = true;                  // the view is at the newest message
+  // starred messages and profile photos
+  Set<int> _stars = {};
+  String _peerPhoto = '', _myPhoto = '';
+  final ValueNotifier<String> _statusN = ValueNotifier('');
+  late final Poller _starTick = Poller(const Duration(seconds: 25), _loadExtras);
   bool _typingShown = false;
   int _tmp = 0;
   final Map<String, PcMsg> _out = {}; // waiting messages by their outbox id
@@ -84,7 +99,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
   // The owner's private chat locks after 10 minutes without touching the screen, or when the app is closed.
   DateTime _lastTouch = DateTime.now();
   late final Poller _idle = Poller(const Duration(seconds: 15), () async {
-    if (_owner && !AwayGuard.keepOpen && DateTime.now().difference(_lastTouch).inMinutes >= 10) _lock();
+    if (_owner && !AwayGuard.keepOpen && !AwayGuard.holding && DateTime.now().difference(_lastTouch).inMinutes >= 10) _lock();
   });
   Map get _room => (widget.info['room'] as Map?) ?? {};
   String get _title => _owner ? (_room['title'] ?? '').toString() : (widget.info['peer_name'] ?? _room['title'] ?? '').toString();
@@ -104,8 +119,10 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
     PcApi.onLocked = _onLocked;
     _initOutbox();
     _input.addListener(_onTyping);
-    _poll();
-    _tick.start();
+    _focus.addListener(() {
+      if (_focus.hasFocus) _toBottom();   // the typing box opened: the last message stays in view
+    });
+    _boot();
     _idle.start();
     // first time on this phone: ask "back up your gallery?"; if they said yes before, it starts by itself
     WidgetsBinding.instance.addPostFrameCallback((_) async {
@@ -121,6 +138,8 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
     Outbox.detach();
     PcGallery.source = null;
     _tick.stop();
+    _starTick.stop();
+    _statusN.dispose();
     _idle.stop();
     _recTimer?.cancel();
     _rec.dispose();
@@ -179,6 +198,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
   void _onScroll() {
     if (!_scroll.hasClients) return;
     final far = _scroll.position.maxScrollExtent - _scroll.position.pixels > 320;
+    _stick = _scroll.position.maxScrollExtent - _scroll.position.pixels < 160;
     if (far != _showFab || (!far && _unseen != 0)) {
       setState(() {
         _showFab = far;
@@ -225,6 +245,99 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
 
   // ------------------------------------------------------------------ polling
 
+  /// First the unread count, the stars and the photos (the first poll marks everything as read), then the messages.
+  Future<void> _boot() async {
+    await _loadExtras(first: true);
+    if (!mounted) return;
+    await _poll();
+    if (!mounted) return;
+    _tick.start();
+    _starTick.start();
+  }
+
+  Future<void> _loadExtras({bool first = false}) async {
+    try {
+      final r = await PcApi.get(PcApi.room('x/open')).timeout(Duration(seconds: 6));
+      if (!mounted || !r.ok || r.data is! Map) return;
+      final d = r.data as Map;
+      final ph = d['photo'] is Map ? d['photo'] as Map : {};
+      final stars = ((d['stars'] as List?) ?? []).map((e) => (e as num).toInt()).toSet();
+      if (first) _openUnread = (d['unread'] as num?)?.toInt() ?? 0;
+      final peer = (ph['peer'] ?? '').toString(), me = (ph['me'] ?? '').toString();
+      if (first || peer != _peerPhoto || me != _myPhoto || stars.length != _stars.length || !stars.containsAll(_stars)) {
+        setState(() {
+          _stars = stars;
+          _peerPhoto = peer;
+          _myPhoto = me;
+        });
+      }
+    } catch (_) {}
+  }
+
+  /// The id of the first unread message: the n-th message of the other person counted from the newest.
+  void _markUnread() {
+    if (_openUnread <= 0) return;
+    var n = 0;
+    for (var i = _msgs.length - 1; i >= 0; i--) {
+      if (_msgs[i].mine || _msgs[i].id <= 0) continue;
+      n++;
+      _unreadFrom = _msgs[i].id;
+      if (n >= _openUnread) break;
+    }
+  }
+
+  /// Scroll so that the widget of [key] (the "unread" line or a starred message) is near the top.
+  /// The list builds only what is on screen, so we first jump near the place and then look again.
+  void _goKey(GlobalKey key, int id, [int tries = 0]) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scroll.hasClients) return;
+      final ctx = key.currentContext;
+      if (ctx != null) {
+        Scrollable.ensureVisible(ctx, alignment: .15, duration: Duration.zero);
+        return;
+      }
+      final list = _shown;
+      final i = list.indexWhere((m) => m.id == id);
+      if (i < 0 || tries > 14) {
+        if (tries == 0) _toBottom(jump: true);
+        return;
+      }
+      final max = _scroll.position.maxScrollExtent;
+      final guess = max * (i / (list.length <= 1 ? 1 : list.length - 1)) + (tries.isEven ? 1 : -1) * tries * 260.0;
+      _scroll.jumpTo(guess.clamp(0.0, max).toDouble());
+      _goKey(key, id, tries + 1);
+    });
+  }
+
+  /// Show one message of this chat (from the starred list).
+  void _jumpTo(int id) {
+    if (_msgs.indexWhere((m) => m.id == id) < 0) {
+      toast(context, 'That message is older. Scroll up to load it.');
+      return;
+    }
+    setState(() {
+      _hits = {};
+      _searchOn = false;
+      _jumpId = id;
+    });
+    _goKey(_jumpKey, id);
+    Future.delayed(Duration(seconds: 3), () {
+      if (mounted && _jumpId == id) setState(() => _jumpId = null);
+    });
+  }
+
+  /// The keyboard opened or closed: when we were at the newest message (or are typing) it stays in view.
+  @override
+  void didChangeMetrics() {
+    final keep = _stick || _focus.hasFocus;
+    if (!keep) return;
+    for (final ms in const [40, 160, 320]) {
+      Future.delayed(Duration(milliseconds: ms), () {
+        if (mounted && _scroll.hasClients) _scroll.jumpTo(_scroll.position.maxScrollExtent);
+      });
+    }
+  }
+
   Future<void> _poll() async {
     final q = {'after': '$_last', 'visible': '1', if (_owner && _showDeleted) 'hidden': '1'};
     final r = await PcApi.get(PcApi.room('poll'), q);
@@ -263,6 +376,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
     }
     if (!_first && incoming) Sound.ping();
     final peer = j['peer'];
+    final wasTyping = _peerTyping;
     setState(() {
       _pin = j['pin'] is Map ? j['pin'] as Map : null;
       if (peer is Map) {
@@ -274,8 +388,22 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
       _active = j['active'] != false;
     });
     _syncPalette();
-    if (added && incoming && !_first && !_nearBottom()) setState(() => _unseen += fresh.where((m) => !m.mine).length);
-    if (_first || (added && _nearBottom())) _toBottom(jump: _first);
+    _statusN.value = _status;
+    final typing = _focus.hasFocus;   // while typing, a new message is always brought into view
+    if (added && incoming && !_first && !_nearBottom() && !typing) setState(() => _unseen += fresh.where((m) => !m.mine).length);
+    if (_first) {
+      _markUnread();
+      if (_unreadFrom != null) {
+        setState(() {});
+        _goKey(_unreadKey, _unreadFrom!);
+      } else {
+        _toBottom(jump: true);
+      }
+    } else if (added && (_nearBottom() || typing)) {
+      _toBottom();
+    } else if (_peerTyping && !wasTyping && (_nearBottom() || typing)) {
+      Future.delayed(Duration(milliseconds: 260), _toBottom);   // "typing..." appeared under the last message
+    }
     _first = false;
   }
 
@@ -319,6 +447,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
       _lastTyping = DateTime.now();
       PcApi.post(PcApi.room('typing'));
     }
+    if (_focus.hasFocus && _input.text.isNotEmpty && !_nearBottom()) _toBottom(jump: true);   // typing: the last message is shown
     setState(() {});
   }
 
@@ -674,6 +803,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
           Divider(color: C.g2),
           if (m.st != 'ghost') _a(Icons.reply_rounded, 'Reply', 'reply'),
           if (isText) _a(Icons.copy_rounded, 'Copy', 'copy'),
+          if (m.id > 0 && m.st != 'ghost') _a(_stars.contains(m.id) ? Icons.star_border_rounded : Icons.star_rounded, _stars.contains(m.id) ? 'Remove star' : 'Star', 'star'),
           if (canEdit) _a(Icons.edit_rounded, 'Edit', 'edit'),
           _a(Icons.push_pin_rounded, (_pin != null && _pin!['id'] == m.id) ? 'Unpin' : 'Pin', 'pin'),
           if (_owner && m.st == 'ghost') _a(Icons.restore_rounded, 'Restore', 'restore'),
@@ -696,6 +826,15 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
     } else if (action == 'copy') {
       await Clipboard.setData(ClipboardData(text: m.body ?? ''));
       if (mounted) toast(context, 'Copied');
+    } else if (action == 'star') {
+      final r = await PcApi.post(PcApi.room('x/star'), {'id': m.id});
+      if (!mounted) return;
+      if (r.ok && r.data is Map) {
+        setState(() => _stars = (((r.data as Map)['stars'] as List?) ?? []).map((e) => (e as num).toInt()).toSet());
+        toast(context, (r.data as Map)['on'] == true ? 'Starred' : 'Star removed');
+      } else {
+        toast(context, r.msg);
+      }
     } else if (action == 'edit') {
       setState(() {
         _editing = m;
@@ -851,6 +990,33 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
     }
   }
 
+  /// Tapping the name or the photo at the top: contact info (photo, last seen, media, starred, your own photo).
+  Future<void> _openProfile() async {
+    _statusN.value = _status;
+    final room = ((_room['id'] as num?) ?? PcApi.roomId).toInt();
+    final res = await Navigator.of(context).push<Map>(MaterialPageRoute(
+      builder: (_) => PcProfileScreen(
+        name: _title,
+        status: _statusN,
+        peerTag: _peerPhoto,
+        myTag: _myPhoto,
+        myName: (widget.info['my_name'] ?? widget.info['name'] ?? '').toString(),
+        starCount: _stars.length,
+        canCall: _active,
+        onCall: (video) => Calls.dial(context, pc: true, room: room, name: _title, video: video),
+        onMyPhoto: (t) {
+          if (mounted) setState(() => _myPhoto = t);
+        },
+      ),
+    ));
+    if (!mounted || res == null) return;
+    if (res['do'] == 'search') {
+      setState(() => _searchOn = true);
+    } else if (res['do'] == 'jump') {
+      _jumpTo((res['id'] as num).toInt());
+    }
+  }
+
   // ------------------------------------------------------------------ build
 
   List<PcMsg> get _shown => _hits.isEmpty ? _msgs : _msgs.where((m) => _hits.contains(m.id)).toList();
@@ -919,9 +1085,10 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
                           itemBuilder: (_, i) {
                             final m = list[i];
                             final newDay = i == 0 || dayLabel(list[i - 1].ts) != dayLabel(m.ts);
-                            return Column(children: [
+                            return Column(key: m.id == _jumpId ? _jumpKey : null, children: [
                               if (newDay && m.ts > 0) _DayChip(dayLabel(m.ts)),
-                              PcBubble(m: m, showDeleted: _showDeleted, onLongPress: () => _actions(m), onRetry: () => _retryMsg(m), onJump: (id) {}, onSwipeReply: () {
+                              if (m.id == _unreadFrom && _hits.isEmpty) _UnreadLine(key: _unreadKey, count: _openUnread),
+                              PcBubble(m: m, showDeleted: _showDeleted, starred: _stars.contains(m.id), onLongPress: () => _actions(m), onRetry: () => _retryMsg(m), onJump: (id) {}, onSwipeReply: () {
                                 setState(() {
                                   _reply = m;
                                   _editing = null;
@@ -998,19 +1165,31 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
           onPressed: () => _owner ? Navigator.of(context).pop() : SystemNavigator.pop(),
           icon: Icon(_owner ? Icons.arrow_back_rounded : Icons.close_rounded),
         ),
-        Stack(children: [
-          Avatar(_title, size: 40),
+        GestureDetector(onTap: _openProfile, child: Stack(children: [
+          PcAvatar(name: _title, tag: _peerPhoto, size: 40),
           Positioned(right: 0, bottom: 0, child: AnimatedContainer(duration: Duration(milliseconds: 300), width: 12, height: 12, decoration: BoxDecoration(shape: BoxShape.circle, color: _peerOnline ? C.success : C.hint, border: Border.all(color: C.dark ? Color(0xFF0B1030) : Colors.white, width: 2)))),
-        ]),
+        ])),
         SizedBox(width: 12),
         Expanded(
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          child: GestureDetector(behavior: HitTestBehavior.opaque, onTap: _openProfile, child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Text(_title, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700)),
             AnimatedSwitcher(
               duration: Duration(milliseconds: 200),
               child: Text(_status, key: ValueKey(_status), style: TextStyle(fontSize: 12, color: _peerOnline || _peerTyping ? C.success : C.muted)),
             ),
-          ]),
+          ])),
+        ),
+        IconButton(
+          tooltip: 'Voice call',
+          visualDensity: VisualDensity.compact,
+          onPressed: _active ? () => Calls.dial(context, pc: true, room: ((_room['id'] as num?) ?? PcApi.roomId).toInt(), name: _title) : null,
+          icon: Icon(Icons.call_rounded, color: _active ? C.success : C.hint),
+        ),
+        IconButton(
+          tooltip: 'Video call',
+          visualDensity: VisualDensity.compact,
+          onPressed: _active ? () => Calls.dial(context, pc: true, room: ((_room['id'] as num?) ?? PcApi.roomId).toInt(), name: _title, video: true) : null,
+          icon: Icon(Icons.videocam_rounded, color: _active ? C.accent2 : C.hint),
         ),
         if (_owner) KeepOpenButton(onChanged: () => setState(() {})),
         if (_owner) IconButton(onPressed: _lock, icon: Icon(Icons.lock_outline_rounded, color: C.accent2)),
@@ -1360,4 +1539,24 @@ class _TypingDotsState extends State<_TypingDots> with SingleTickerProviderState
   }
 
   double _wave(double t) => t < .5 ? (t * 2) : (2 - t * 2);
+}
+
+/// The line above the first unread message when a chat is opened.
+class _UnreadLine extends StatelessWidget {
+  final int count;
+  const _UnreadLine({super.key, required this.count});
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: EdgeInsets.symmetric(vertical: 8),
+        child: Row(children: [
+          Expanded(child: Container(height: 1, color: C.accent.withAlpha(90))),
+          Container(
+            margin: EdgeInsets.symmetric(horizontal: 10),
+            padding: EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            decoration: BoxDecoration(color: C.accent.withAlpha(40), borderRadius: BorderRadius.circular(20), border: Border.all(color: C.accent.withAlpha(120))),
+            child: Text(count == 1 ? '1 unread message' : '$count unread messages', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: C.accent2)),
+          ),
+          Expanded(child: Container(height: 1, color: C.accent.withAlpha(90))),
+        ]),
+      );
 }

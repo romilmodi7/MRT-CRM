@@ -12,6 +12,17 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <uses-permission android:name="android.permission.VIBRATE"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
+    <!-- in-app update: install the downloaded APK -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
+    <!-- voice calls -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA"/>
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
 
     <application
         android:label="MRT CRM"
@@ -34,6 +45,8 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- keeps the microphone (and the camera of a video call) working while a call runs and the app is in the background -->
+        <service android:name=".CallService" android:foregroundServiceType="microphone|camera" android:exported="false"/>
         <service android:name="com.baseflow.geolocator.GeolocatorLocationService" android:foregroundServiceType="location" android:exported="false"/>
         <meta-data android:name="flutterEmbedding" android:value="2"/>
         <meta-data android:name="com.google.firebase.messaging.default_notification_channel_id" android:value="chat"/>

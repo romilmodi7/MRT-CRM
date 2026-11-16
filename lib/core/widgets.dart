@@ -389,6 +389,13 @@ class AwayGuard {
   static bool keepOpen = false;
   static int _holds = 0;
   static bool get holding => _holds > 0;
+
+  /// A voice call is running: the private chat stays open until release() (hang up).
+  static void hold() => _holds++;
+  static void release() {
+    if (_holds > 0) _holds--;
+  }
+
   static Future<R> run<R>(Future<R> Function() f) async {
     _holds++;
     try {

@@ -3,12 +3,15 @@ import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../core/push.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../core/api.dart';
+import '../core/call.dart';
+import 'starred_screen.dart';
 import '../core/platform.dart';
 import '../core/stickers.dart';
 import '../core/theme.dart';
@@ -61,14 +64,37 @@ class _ConversationScreenState extends State<ConversationScreen> with WidgetsBin
   int _last = 0;
   bool _first = true, _canWrite = true, _sending = false;
   String _members = '';
+  bool _canCall = false;   // person-to-person chat: the call button is shown
+
+  // opening at the first unread message, keeping the last message above the keyboard
+  final _focus = FocusNode();
+  late int _openUnread = widget.thread.unread;   // unread messages when the chat was opened
+  int? _unreadFrom;                              // id of the first unread message
+  final _unreadKey = GlobalKey();
+  int? _jumpId;
+  final _jumpKey = GlobalKey();
+  bool _stick = true;                            // the view is at the newest message
+  Set<int> _stars = {};                          // starred messages (everybody in the chat sees them)
+  int _ticks = 0;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     Push.here = 'chat:${widget.thread.id}';
-    _load();
-    _tick.start();
+    _scroll.addListener(() {
+      if (_scroll.hasClients) _stick = _scroll.position.maxScrollExtent - _scroll.position.pixels < 160;
+    });
+    _focus.addListener(() {
+      if (_focus.hasFocus) _toBottom();   // the typing box opened: the last message stays in view
+    });
+    _input.addListener(() {
+      if (_focus.hasFocus && _input.text.isNotEmpty && !_nearBottom()) _toBottom(jump: true);   // typing: the last message is shown
+    });
+    _boot();
+    Api.get('call/peer/${widget.thread.id}').then((r) {
+      if (mounted && r.ok) setState(() => _canCall = true);
+    });
   }
 
   @override
@@ -77,6 +103,7 @@ class _ConversationScreenState extends State<ConversationScreen> with WidgetsBin
     if (Push.here == 'chat:${widget.thread.id}') Push.here = '';
     _tick.stop();
     _input.dispose();
+    _focus.dispose();
     _scroll.dispose();
     super.dispose();
   }
@@ -91,7 +118,124 @@ class _ConversationScreenState extends State<ConversationScreen> with WidgetsBin
     }
   }
 
+  /// First the unread count and the stars (loading the messages marks them as read), then the messages.
+  Future<void> _boot() async {
+    await _loadExtras(first: true);
+    if (!mounted) return;
+    await _load();
+    if (mounted) _tick.start();
+  }
+
+  Future<void> _loadExtras({bool first = false}) async {
+    try {
+      final r = await Api.get('chatx/${widget.thread.id}/open').timeout(Duration(seconds: 6));
+      if (!mounted || !r.ok || r.data is! Map) return;
+      final d = r.data as Map;
+      if (first) _openUnread = (d['unread'] as num?)?.toInt() ?? _openUnread;
+      final stars = ((d['stars'] as List?) ?? []).map((e) => (e as num).toInt()).toSet();
+      if (stars.length != _stars.length || !stars.containsAll(_stars)) setState(() => _stars = stars);
+    } catch (_) {}
+  }
+
+  bool _nearBottom() => !_scroll.hasClients || _scroll.position.maxScrollExtent - _scroll.position.pixels < 160;
+
+  /// The id of the first unread message: the n-th message of other people counted from the newest.
+  void _markUnread() {
+    if (_openUnread <= 0) return;
+    var n = 0;
+    for (var i = _msgs.length - 1; i >= 0; i--) {
+      if (_msgs[i].mine) continue;
+      n++;
+      _unreadFrom = _msgs[i].id;
+      if (n >= _openUnread) break;
+    }
+  }
+
+  /// Scroll so that the widget of [key] (the "unread" line or a starred message) is near the top.
+  /// The list builds only what is on screen, so we first jump near the place and then look again.
+  void _goKey(GlobalKey key, int id, [int tries = 0]) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scroll.hasClients) return;
+      final ctx = key.currentContext;
+      if (ctx != null) {
+        Scrollable.ensureVisible(ctx, alignment: .15, duration: Duration.zero);
+        return;
+      }
+      final i = _msgs.indexWhere((m) => m.id == id);
+      if (i < 0 || tries > 14) {
+        if (tries == 0) _toBottom(jump: true);
+        return;
+      }
+      final max = _scroll.position.maxScrollExtent;
+      final guess = max * (i / (_msgs.length <= 1 ? 1 : _msgs.length - 1)) + (tries.isEven ? 1 : -1) * tries * 260.0;
+      _scroll.jumpTo(guess.clamp(0.0, max).toDouble());
+      _goKey(key, id, tries + 1);
+    });
+  }
+
+  void _jumpTo(int id) {
+    if (_msgs.indexWhere((m) => m.id == id) < 0) {
+      toast(context, 'That message is older and is not loaded here.');
+      return;
+    }
+    setState(() => _jumpId = id);
+    _goKey(_jumpKey, id);
+    Future.delayed(Duration(seconds: 3), () {
+      if (mounted && _jumpId == id) setState(() => _jumpId = null);
+    });
+  }
+
+  /// The keyboard opened or closed: when we were at the newest message (or are typing) it stays in view.
+  @override
+  void didChangeMetrics() {
+    if (!(_stick || _focus.hasFocus)) return;
+    for (final ms in const [40, 160, 320]) {
+      Future.delayed(Duration(milliseconds: ms), () {
+        if (mounted && _scroll.hasClients) _scroll.jumpTo(_scroll.position.maxScrollExtent);
+      });
+    }
+  }
+
+  Future<void> _openStarred() async {
+    final id = await Navigator.of(context).push<int>(MaterialPageRoute(builder: (_) => StarredScreen(thread: widget.thread.id, title: widget.thread.title)));
+    if (id != null && mounted) _jumpTo(id);
+  }
+
+  /// Hold a message: star it (or remove the star) or copy its text.
+  Future<void> _msgMenu(Msg m) async {
+    final on = _stars.contains(m.id);
+    final isText = m.text.isNotEmpty && StickerMsg.parse(m.text) == null;
+    final v = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: C.card2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(26))),
+      builder: (_) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          SizedBox(height: 10),
+          ListTile(leading: Icon(on ? Icons.star_border_rounded : Icons.star_rounded, color: Color(0xFFF5B400)), title: Text(on ? 'Remove star' : 'Star'), onTap: () => Navigator.pop(context, 'star')),
+          if (isText) ListTile(leading: Icon(Icons.copy_rounded, color: C.accent2), title: Text('Copy'), onTap: () => Navigator.pop(context, 'copy')),
+          SizedBox(height: 8),
+        ]),
+      ),
+    );
+    if (v == null || !mounted) return;
+    if (v == 'copy') {
+      await Clipboard.setData(ClipboardData(text: m.text));
+      if (mounted) toast(context, 'Copied');
+    } else {
+      final r = await Api.post('chatx/${widget.thread.id}/star', {'id': m.id});
+      if (!mounted) return;
+      if (r.ok && r.data is Map) {
+        setState(() => _stars = (((r.data as Map)['stars'] as List?) ?? []).map((e) => (e as num).toInt()).toSet());
+        toast(context, (r.data as Map)['on'] == true ? 'Starred' : 'Star removed');
+      } else {
+        toast(context, r.code == 404 ? 'Starred messages are not set up on the server yet.' : r.msg);
+      }
+    }
+  }
+
   Future<void> _load() async {
+    if (++_ticks % 6 == 0) _loadExtras();   // stars set by other people show up within half a minute
     final r = await Api.get('chat/${widget.thread.id}?after=$_last');
     if (!mounted || !r.ok || r.data is! Map) return;
     final d = r.data as Map;
@@ -104,20 +248,37 @@ class _ConversationScreenState extends State<ConversationScreen> with WidgetsBin
     final inc = ((d['messages'] as List?) ?? []).whereType<Map>().map(Msg.from).where((m) => m.id > _last).toList();
     if (inc.isNotEmpty) {
       if (!_first && inc.any((m) => !m.mine)) Sound.ping();
+      final stay = _nearBottom() || _focus.hasFocus || inc.any((m) => m.mine);   // reading older messages: do not pull the view down
       setState(() {
         _msgs.addAll(inc);
         _last = inc.last.id;
       });
-      _toBottom();
+      if (_first) {
+        _markUnread();
+        if (_unreadFrom != null) {
+          setState(() {});
+          _goKey(_unreadKey, _unreadFrom!);
+        } else {
+          _toBottom(jump: true);
+        }
+      } else if (stay) {
+        _toBottom();
+      }
     } else if (_first) {
       setState(() {});
     }
     _first = false;
   }
 
-  void _toBottom() {
+  void _toBottom({bool jump = false}) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scroll.hasClients) _scroll.animateTo(_scroll.position.maxScrollExtent, duration: Duration(milliseconds: 260), curve: Curves.easeOut);
+      if (!_scroll.hasClients) return;
+      final t = _scroll.position.maxScrollExtent;
+      if (jump) {
+        _scroll.jumpTo(t);
+      } else {
+        _scroll.animateTo(t, duration: Duration(milliseconds: 260), curve: Curves.easeOut);
+      }
     });
   }
 
@@ -219,6 +380,16 @@ class _ConversationScreenState extends State<ConversationScreen> with WidgetsBin
               ]),
             ),
           ]),
+          actions: [
+            IconButton(tooltip: 'Starred messages', onPressed: _openStarred, icon: Icon(_stars.isEmpty ? Icons.star_border_rounded : Icons.star_rounded, color: Color(0xFFF5B400))),
+            if (_canCall)
+              IconButton(
+                tooltip: 'Voice call',
+                onPressed: () => Calls.dial(context, pc: false, thread: widget.thread.id, name: widget.thread.title),
+                icon: Icon(Icons.call_rounded, color: C.success),
+              ),
+            SizedBox(width: 4),
+          ],
         ),
         body: Column(children: [
           Expanded(
@@ -231,9 +402,10 @@ class _ConversationScreenState extends State<ConversationScreen> with WidgetsBin
                     itemBuilder: (_, i) {
                       final m = _msgs[i];
                       final newDay = i == 0 || _msgs[i - 1].day != m.day;
-                      return Column(children: [
+                      return Column(key: m.id == _jumpId ? _jumpKey : null, children: [
                         if (newDay && m.day.isNotEmpty) _DayChip(m.day),
-                        _Bubble(m: m, showName: !m.mine && m.name.isNotEmpty && (i == 0 || _msgs[i - 1].name != m.name || newDay)),
+                        if (m.id == _unreadFrom) _UnreadLine(key: _unreadKey, count: _openUnread),
+                        _Bubble(m: m, starred: _stars.contains(m.id), onLongPress: () => _msgMenu(m), showName: !m.mine && m.name.isNotEmpty && (i == 0 || _msgs[i - 1].name != m.name || newDay)),
                       ]);
                     },
                   ),
@@ -264,6 +436,7 @@ class _ConversationScreenState extends State<ConversationScreen> with WidgetsBin
                   Expanded(
                     child: TextField(
                       controller: _input,
+                      focusNode: _focus,
                       minLines: 1,
                       maxLines: 5,
                       textCapitalization: TextCapitalization.sentences,
@@ -324,7 +497,9 @@ class _DayChip extends StatelessWidget {
 class _Bubble extends StatelessWidget {
   final Msg m;
   final bool showName;
-  const _Bubble({required this.m, required this.showName});
+  final bool starred;
+  final VoidCallback? onLongPress;
+  const _Bubble({required this.m, required this.showName, this.starred = false, this.onLongPress});
 
   Future<void> _openFile(BuildContext c, Attach a) async {
     toast(c, 'Opening...');
@@ -348,14 +523,16 @@ class _Bubble extends StatelessWidget {
     if (stk != null) {
       return Align(
         alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
-        child: Padding(
+        child: GestureDetector(
+          onLongPress: onLongPress,
+          child: Padding(
           padding: EdgeInsets.symmetric(vertical: 3),
           child: Column(crossAxisAlignment: mine ? CrossAxisAlignment.end : CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
             if (showName) Padding(padding: EdgeInsets.only(bottom: 2, left: 4), child: Text(m.name, style: TextStyle(color: C.accent2, fontSize: 12, fontWeight: FontWeight.w700))),
             StickerView(stk, mine: mine),
-            Padding(padding: EdgeInsets.only(top: 2, left: 4, right: 4), child: Text(m.time, style: TextStyle(fontSize: 11, color: C.muted))),
+            Padding(padding: EdgeInsets.only(top: 2, left: 4, right: 4), child: Text('${starred ? '★ ' : ''}${m.time}', style: TextStyle(fontSize: 11, color: C.muted))),
           ]),
-        ),
+        )),
       );
     }
     return TweenAnimationBuilder<double>(
@@ -365,7 +542,9 @@ class _Bubble extends StatelessWidget {
       builder: (_, v, c) => Opacity(opacity: v.clamp(0.0, 1.0), child: Transform.scale(scale: .94 + .06 * v, alignment: mine ? Alignment.bottomRight : Alignment.bottomLeft, child: c)),
       child: Align(
         alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
-        child: Container(
+        child: GestureDetector(
+          onLongPress: onLongPress,
+          child: Container(
           margin: EdgeInsets.symmetric(vertical: 3),
           constraints: BoxConstraints(maxWidth: maxW),
           padding: EdgeInsets.fromLTRB(14, 9, 14, 7),
@@ -402,11 +581,31 @@ class _Bubble extends StatelessWidget {
             SizedBox(height: 3),
             Align(
               alignment: Alignment.centerRight,
-              child: Text('${m.edited ? 'edited  ' : ''}${m.time}', style: TextStyle(fontSize: 11, color: mine ? Color(0xCCFFFFFF) : CB.theirMeta)),
+              child: Text('${starred ? '★  ' : ''}${m.edited ? 'edited  ' : ''}${m.time}', style: TextStyle(fontSize: 11, color: mine ? Color(0xCCFFFFFF) : CB.theirMeta)),
             ),
           ]),
-        ),
+        )),
       ),
     );
   }
+}
+
+/// The line above the first unread message when a chat is opened.
+class _UnreadLine extends StatelessWidget {
+  final int count;
+  const _UnreadLine({super.key, required this.count});
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: EdgeInsets.symmetric(vertical: 8),
+        child: Row(children: [
+          Expanded(child: Container(height: 1, color: C.accent.withAlpha(90))),
+          Container(
+            margin: EdgeInsets.symmetric(horizontal: 10),
+            padding: EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            decoration: BoxDecoration(color: C.accent.withAlpha(40), borderRadius: BorderRadius.circular(20), border: Border.all(color: C.accent.withAlpha(120))),
+            child: Text(count == 1 ? '1 unread message' : '$count unread messages', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: C.accent2)),
+          ),
+          Expanded(child: Container(height: 1, color: C.accent.withAlpha(90))),
+        ]),
+      );
 }

@@ -47,7 +47,8 @@ class PcBubble extends StatelessWidget {
   final VoidCallback onRetry;
   final void Function(int id) onJump;
   final VoidCallback? onSwipeReply;
-  const PcBubble({super.key, required this.m, required this.showDeleted, required this.onLongPress, required this.onRetry, required this.onJump, this.onSwipeReply});
+  final bool starred;
+  const PcBubble({super.key, required this.m, required this.showDeleted, required this.onLongPress, required this.onRetry, required this.onJump, this.onSwipeReply, this.starred = false});
 
   Color get _fg => m.mine ? Colors.white : CB.theirFg;
   Color get _meta => m.mine ? Color(0xCCFFFFFF) : CB.theirMeta;
@@ -65,7 +66,7 @@ class PcBubble extends StatelessWidget {
     }
     final stk = m.type == 'text' ? StickerMsg.parse(m.body) : null;
     if (stk != null) {
-      return _wrap(context, mine, child: StickerView(stk, mine: mine), bare: true, maxW: maxW);
+      return _wrap(context, mine, child: Stack(children: [StickerView(stk, mine: mine), if (starred) Positioned(right: 4, top: 4, child: Icon(Icons.star_rounded, size: 16, color: Color(0xFFFFD54A)))]), bare: true, maxW: maxW);
     }
     if (m.type == 'gone') {
       return _wrap(context, mine, maxW: maxW, child: Row(mainAxisSize: MainAxisSize.min, children: [
@@ -113,6 +114,7 @@ class PcBubble extends StatelessWidget {
     }
     children.add(SizedBox(height: 3));
     children.add(Row(mainAxisSize: MainAxisSize.min, mainAxisAlignment: MainAxisAlignment.end, children: [
+      if (starred) Padding(padding: EdgeInsets.only(right: 4), child: Icon(Icons.star_rounded, size: 13, color: Color(0xFFFFD54A))),
       if (m.edited) Text('edited  ', style: TextStyle(fontSize: 11, color: _meta)),
       Text(m.ts == 0 ? '' : clock(m.ts), style: TextStyle(fontSize: 11, color: _meta)),
       if (mine) ...[SizedBox(width: 4), _ticks()],

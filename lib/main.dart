@@ -5,10 +5,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'core/api.dart';
+import 'core/call.dart';
 import 'core/platform.dart';
 import 'core/push.dart';
 import 'core/session.dart';
 import 'core/theme.dart';
+import 'core/update.dart';
 import 'pc/room_chat_screen.dart';
 import 'screens/login_screen.dart';
 import 'screens/threads_screen.dart';
@@ -41,6 +43,16 @@ class _EmployeeChatAppState extends State<EmployeeChatApp> with WidgetsBindingOb
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    Calls.watch();   // notices an incoming voice call while the app is open
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState s) {
+    Calls.fg = s == AppLifecycleState.resumed;
+    if (Calls.fg) {
+      Calls.check();
+      Updater.check();   // a new version of the app? (asks at most once in 3 hours)
+    }
   }
 
   @override
@@ -122,6 +134,8 @@ class _BootState extends State<_Boot> {
     ));
     Push.sync();
     Future.delayed(Duration(milliseconds: 700), Push.openPending);
+    Future.delayed(Duration(milliseconds: 1500), Calls.check);
+    Future.delayed(Duration(milliseconds: 2500), () => Updater.check(now: true));
     // The permission questions come AFTER the first screen is shown (asking them while the splash waits made it hang until the app was reopened)
     if (!Session.permsAsked) {
       Future.delayed(Duration(milliseconds: 1200), () async {

@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import '../screens/conversation_screen.dart';
 import '../screens/threads_screen.dart';
 import 'api.dart';
+import 'call.dart';
 import 'fcm_config.dart';
 import 'session.dart';
 import 'theme.dart';
@@ -83,6 +84,10 @@ class Push {
   static void _foreground(RemoteMessage r) {
     try {
       final d = r.data;
+      if (d['kind'] == 'call') {
+        Calls.check();   // the call screen opens by itself
+        return;
+      }
       final key = d['kind'] == 'private' ? 'pc:${d['room']}' : 'chat:${d['thread']}';
       if (here == key) return;
       final title = r.notification?.title ?? '';
@@ -120,6 +125,10 @@ class Push {
   static void openPending() {
     final d = _tap;
     _tap = null;
+    if (d != null && d['kind'] == 'call') {
+      Calls.check();   // tapped "Incoming voice call": show the call if it is still ringing
+      return;
+    }
     if (d == null || d['kind'] != 'chat' || Session.token == null) return;
     final id = int.tryParse((d['thread'] ?? '').toString()) ?? 0;
     final nav = navKey.currentState;
