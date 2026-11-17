@@ -256,7 +256,63 @@ class StickerImage extends StatelessWidget {
   Widget build(BuildContext context) {
     if (kind == 'tgs') return SizedBox(width: size, height: size, child: _TgsSticker(id: id, pc: pc));
     if (kind == 'webm') return SizedBox(width: size, height: size, child: _VideoSticker(id: id, pc: pc));
-    return AuthImage(cacheKey: 'stk$id', loader: () => StickerStore.bytes(id, pc: pc), width: size, height: size, fit: BoxFit.contain);
+    return SizedBox(width: size, height: size, child: _AnySticker(id: id, pc: pc));
+  }
+}
+
+/// A sticker marked as a picture: the file itself says what it really is (a video or animated sticker that was
+/// saved as a picture by an older import still plays), so no sticker waits forever.
+class _AnySticker extends StatefulWidget {
+  final int id;
+  final bool pc;
+  const _AnySticker({required this.id, required this.pc});
+  @override
+  State<_AnySticker> createState() => _AnyStickerState();
+}
+
+class _AnyStickerState extends State<_AnySticker> {
+  static final Map<int, String> _kind = {};   // what each file turned out to be
+  File? _f;
+  bool _failed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _open();
+  }
+
+  Future<void> _open() async {
+    final f = await StickerStore.load(widget.id, pc: widget.pc);
+    if (!mounted) return;
+    if (f == null) {
+      setState(() => _failed = true);
+      return;
+    }
+    if (!_kind.containsKey(widget.id)) {
+      String k = 'img';
+      try {
+        final raf = await f.open();
+        final h = await raf.read(4);
+        await raf.close();
+        if (h.length >= 4 && h[0] == 0x1A && h[1] == 0x45 && h[2] == 0xDF && h[3] == 0xA3) {
+          k = 'webm';
+        } else if (h.length >= 2 && h[0] == 0x1F && h[1] == 0x8B) {
+          k = 'tgs';
+        }
+      } catch (_) {}
+      _kind[widget.id] = k;
+    }
+    if (mounted) setState(() => _f = f);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final f = _f;
+    if (f == null) return _StickerWait(failed: _failed);
+    final k = _kind[widget.id] ?? 'img';
+    if (k == 'webm') return _VideoSticker(id: widget.id, pc: widget.pc);
+    if (k == 'tgs') return _TgsSticker(id: widget.id, pc: widget.pc);
+    return Image.file(f, fit: BoxFit.contain, gaplessPlayback: true, errorBuilder: (_, __, ___) => _StickerWait(failed: true));
   }
 }
 
@@ -370,7 +426,12 @@ class _VideoStickerState extends State<_VideoSticker> {
     }
     try {
       final c = VideoPlayerController.file(f, videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true));
-      await c.initialize();
+      try {
+        await c.initialize().timeout(Duration(seconds: 8));   // a player that never starts must not block the others
+      } catch (_) {
+        c.dispose();
+        rethrow;
+      }
       await c.setVolume(0);
       await c.setLooping(true);
       if (!mounted) {
