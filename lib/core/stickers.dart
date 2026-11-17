@@ -4,12 +4,14 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
 import 'package:flutter/material.dart';
 import 'package:lottie/lottie.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:video_player/video_player.dart';
 
 import 'api.dart';
+import 'config.dart';
 import 'session.dart';
 import 'theme.dart';
 import 'widgets.dart';
@@ -116,6 +118,44 @@ class StickerView extends StatelessWidget {
 /// Sticker packs made in the CRM ("Chat stickers" screen). Team chat and private chat each keep their own list
 /// (private chat also gets the "private chat only" packs). The lists are kept on the phone and refreshed when the
 /// sticker panel opens; every sticker file is downloaded once and kept, so it also shows without internet.
+/// Downloads one sticker file. 40 s at most; the reason of a failure is kept in StickerStore.why.
+class StickerNet {
+  static Future<Uint8List?> get(String path, bool pc) async {
+    final id = int.tryParse(path.split('/').last) ?? 0;
+    try {
+      final uri = pc ? PcApi.uri(path) : Uri.parse(kApi + path);
+      final r = await http.get(uri, headers: pc ? PcApi.headers() : Api.headers()).timeout(Duration(seconds: 40));
+      if (pc) {
+        final t = r.headers['x-pc-token'];
+        if (t != null && PcApi.owner) PcApi.token = t;
+      }
+      if (r.statusCode == 200 && r.bodyBytes.isNotEmpty) {
+        final ct = (r.headers['content-type'] ?? '').toLowerCase();
+        if (ct.contains('json') || ct.contains('html')) {
+          StickerStore.why[id] = 'The server sent a page instead of the sticker ($ct).';
+          return null;
+        }
+        return r.bodyBytes;
+      }
+      StickerStore.why[id] = r.statusCode == 404
+          ? 'Sticker not found on the server (404). The pack may be off for this chat or the file is missing.'
+          : r.statusCode == 401
+              ? 'The chat is locked (401). Open the chat again.'
+              : r.statusCode == 429
+                  ? 'Too many downloads at once (429). Wait a minute and try again.'
+                  : 'The server answered ${r.statusCode}.';
+      if (r.statusCode == 401 && pc) PcApi.onLocked?.call('Locked');
+      return null;
+    } on TimeoutException {
+      StickerStore.why[id] = 'The download took too long (slow internet). Tap to try again.';
+      return null;
+    } catch (e) {
+      StickerStore.why[id] = 'No connection to the server ($e).';
+      return null;
+    }
+  }
+}
+
 class _Job {
   final int id;
   final bool pc;
@@ -170,7 +210,7 @@ class StickerStore {
   static final List<_Job> _queue = [];
   static final Set<int> _queued = {};
   static int _running = 0;
-  static const int _parallel = 4;
+  static const int _parallel = 2;
 
   /// Get these stickers ready (first ones first). Already kept stickers cost nothing.
   static void prefetch(Iterable<Sticker> list, {bool pc = false, bool front = false}) {
@@ -215,6 +255,20 @@ class StickerStore {
   static final Set<int> _have = {};
   static String? _dir;
 
+  /// why a sticker could not be loaded (shown when the person taps the retry button)
+  static final Map<int, String> why = {};
+
+  /// forget a failed / stuck sticker so it is fetched again
+  static Future<void> retry(int id) async {
+    _loading.remove(id);
+    _have.remove(id);
+    why.remove(id);
+    try {
+      final f = await file(id);
+      if (await f.exists()) await f.delete();
+    } catch (_) {}
+  }
+
   /// true when the sticker file is already on the phone (no waiting)
   static bool has(int id) => _have.contains(id);
 
@@ -228,12 +282,15 @@ class StickerStore {
         _have.add(id);
         return f;
       }
-      final b = await (pc && PcApi.token != null ? PcApi.bytes(PcApi.room('x/sticker/$id')) : Api.bytes('sticker/$id'));
-      if (b == null || b.isEmpty) return null;
-      await f.writeAsBytes(b, flush: true);
+      final path = pc && PcApi.token != null ? PcApi.room('x/sticker/$id') : 'sticker/$id';
+      final r = await StickerNet.get(path, pc && PcApi.token != null);
+      if (r == null) return null;
+      await f.writeAsBytes(r, flush: true);
       _have.add(id);
+      why.remove(id);
       return f;
-    } catch (_) {
+    } catch (e) {
+      why[id] = 'Could not save the sticker on the phone ($e)';
       return null;
     }
   }
@@ -274,6 +331,19 @@ class _AnyStickerState extends State<_AnySticker> {
   static final Map<int, String> _kind = {};   // what each file turned out to be
   File? _f;
   bool _failed = false;
+  int _try = 0;
+
+  Future<void> _retry() async {
+    await StickerStore.retry(widget.id);
+    _kind.remove(widget.id);
+    if (!mounted) return;
+    setState(() {
+      _f = null;
+      _failed = false;
+      _try++;
+    });
+    _open();
+  }
 
   @override
   void initState() {
@@ -308,23 +378,68 @@ class _AnyStickerState extends State<_AnySticker> {
   @override
   Widget build(BuildContext context) {
     final f = _f;
-    if (f == null) return _StickerWait(failed: _failed);
+    if (f == null) return _StickerWait(key: ValueKey('a$_try'), failed: _failed, id: widget.id, onRetry: _retry);
     final k = _kind[widget.id] ?? 'img';
     if (k == 'webm') return _VideoSticker(id: widget.id, pc: widget.pc);
     if (k == 'tgs') return _TgsSticker(id: widget.id, pc: widget.pc);
-    return Image.file(f, fit: BoxFit.contain, gaplessPlayback: true, errorBuilder: (_, __, ___) => _StickerWait(failed: true));
+    return Image.file(f, fit: BoxFit.contain, gaplessPlayback: true, errorBuilder: (_, __, ___) => _StickerWait(failed: true, id: widget.id, onRetry: _retry));
   }
 }
 
-class _StickerWait extends StatelessWidget {
+/// Loader of a sticker. When it fails, or keeps loading for 15 s, it turns into a retry button;
+/// a long press shows why it failed.
+class _StickerWait extends StatefulWidget {
   final bool failed;
-  const _StickerWait({this.failed = false});
+  final int id;
+  final VoidCallback? onRetry;
+  const _StickerWait({super.key, this.failed = false, this.id = 0, this.onRetry});
   @override
-  Widget build(BuildContext context) => Center(
-        child: failed
-            ? Icon(Icons.broken_image_outlined, color: C.hint)
-            : SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2, color: C.accent2)),
-      );
+  State<_StickerWait> createState() => _StickerWaitState();
+}
+
+class _StickerWaitState extends State<_StickerWait> {
+  Timer? _t;
+  bool _slow = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _t = Timer(Duration(seconds: 15), () {
+      if (mounted) setState(() => _slow = true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _t?.cancel();
+    super.dispose();
+  }
+
+  void _why() {
+    final w = StickerStore.why[widget.id] ?? (widget.failed ? 'This sticker could not be shown on this phone.' : 'Still downloading…');
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(content: Text(w), duration: Duration(seconds: 5)));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final retry = (widget.failed || _slow) && widget.onRetry != null;
+    if (!retry && !widget.failed) {
+      return Center(child: SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2, color: C.accent2)));
+    }
+    return Center(
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: retry ? widget.onRetry : _why,
+        onLongPress: _why,
+        child: Container(
+          width: 40,
+          height: 40,
+          decoration: BoxDecoration(color: C.g1, borderRadius: BorderRadius.circular(12), border: Border.all(color: C.line)),
+          child: Icon(retry ? Icons.refresh_rounded : Icons.broken_image_outlined, color: retry ? C.accent2 : C.hint, size: 22),
+        ),
+      ),
+    );
+  }
 }
 
 Uint8List _gunzip(Uint8List b) => Uint8List.fromList(gzip.decode(b));
@@ -342,6 +457,19 @@ class _TgsStickerState extends State<_TgsSticker> {
   static final Map<int, Uint8List> _json = {};   // unpacked animations, so lists scroll smoothly
   Uint8List? _data;
   bool _failed = false;
+  int _try = 0;
+
+  Future<void> _retry() async {
+    await StickerStore.retry(widget.id);
+    _json.remove(widget.id);
+    if (!mounted) return;
+    setState(() {
+      _data = null;
+      _failed = false;
+      _try++;
+    });
+    _open();
+  }
 
   @override
   void initState() {
@@ -355,7 +483,13 @@ class _TgsStickerState extends State<_TgsSticker> {
     if (!mounted) return;
     try {
       if (b == null) throw 'none';
-      final j = await compute(_gunzip, b);
+      final Uint8List j;
+      try {
+        j = await compute(_gunzip, b);
+      } catch (_) {
+        StickerStore.why[widget.id] = 'This animated sticker file is damaged.';
+        rethrow;
+      }
       if (_json.length > 120) _json.remove(_json.keys.first);
       _json[widget.id] = j;
       if (mounted) setState(() => _data = j);
@@ -367,8 +501,8 @@ class _TgsStickerState extends State<_TgsSticker> {
   @override
   Widget build(BuildContext context) {
     final d = _data;
-    if (d == null) return _StickerWait(failed: _failed);
-    return Lottie.memory(d, fit: BoxFit.contain, repeat: true, frameRate: FrameRate.max, errorBuilder: (_, __, ___) => _StickerWait(failed: true));
+    if (d == null) return _StickerWait(key: ValueKey('t$_try'), failed: _failed, id: widget.id, onRetry: _retry);
+    return Lottie.memory(d, fit: BoxFit.contain, repeat: true, frameRate: FrameRate.max, errorBuilder: (_, __, ___) => _StickerWait(failed: true, id: widget.id, onRetry: _retry));
   }
 }
 
@@ -405,6 +539,19 @@ class _VideoStickerState extends State<_VideoSticker> {
 
   VideoPlayerController? _c;
   bool _failed = false;
+  int _try = 0;
+
+  Future<void> _retry() async {
+    _c?.dispose();
+    await StickerStore.retry(widget.id);
+    if (!mounted) return;
+    setState(() {
+      _c = null;
+      _failed = false;
+      _try++;
+    });
+    _open();
+  }
 
   @override
   void initState() {
@@ -428,8 +575,9 @@ class _VideoStickerState extends State<_VideoSticker> {
       final c = VideoPlayerController.file(f, videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true));
       try {
         await c.initialize().timeout(Duration(seconds: 8));   // a player that never starts must not block the others
-      } catch (_) {
+      } catch (e) {
         c.dispose();
+        StickerStore.why[widget.id] = e is TimeoutException ? 'This phone could not start the video sticker in time.' : 'This phone can not play this video sticker ($e).';
         rethrow;
       }
       await c.setVolume(0);
@@ -456,7 +604,7 @@ class _VideoStickerState extends State<_VideoSticker> {
   @override
   Widget build(BuildContext context) {
     final c = _c;
-    if (c == null || !c.value.isInitialized) return _StickerWait(failed: _failed);
+    if (c == null || !c.value.isInitialized) return _StickerWait(key: ValueKey('v$_try'), failed: _failed, id: widget.id, onRetry: _retry);
     return FittedBox(fit: BoxFit.contain, child: SizedBox(width: c.value.size.width, height: c.value.size.height, child: VideoPlayer(c)));
   }
 }
@@ -474,7 +622,7 @@ List<StickerPack> _allPacks(Map? roomPack, bool pc) => [
 void warmStickers({bool pc = false}) {
   StickerStore.refresh(pc: pc).whenComplete(() {
     final list = StickerStore.packs(pc);
-    if (list.isNotEmpty) StickerStore.prefetch(list.first.items, pc: pc);
+    if (list.isNotEmpty) StickerStore.prefetch(list.first.items.take(24), pc: pc);
   });
 }
 
