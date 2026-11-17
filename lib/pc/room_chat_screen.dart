@@ -70,6 +70,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
   bool _stick = true;                  // the view is at the newest message
   // starred messages and profile photos
   Set<int> _stars = {};
+  final Set<int> _sel = {};   // messages picked for copy / delete / restore together
   String _peerPhoto = '', _myPhoto = '';
   final ValueNotifier<String> _statusN = ValueNotifier('');
   late final Poller _starTick = Poller(const Duration(seconds: 25), _loadExtras);
@@ -764,6 +765,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
     );
     if (url == null) return;
     await _sendMsg({'type': 'gif', 'gif': url}, PcMsg(id: -(++_tmp), mine: true, ts: DateTime.now().millisecondsSinceEpoch ~/ 1000, tick: 0, type: 'gif', gif: url, pending: true));
+    PcGifs.sent(url);   // into "This chat" of this room and into my Saved GIFs
   }
 
   // ------------------------------------------------------------------ voice
@@ -813,6 +815,119 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
 
   // ------------------------------------------------------------------ actions on a message
 
+  // ------------------------------------------------------------------ many messages at once
+
+  List<PcMsg> get _picked => _msgs.where((m) => _sel.contains(m.id)).toList()..sort((a, b) => a.id.compareTo(b.id));
+
+  void _toggleSel(PcMsg m) {
+    if (m.id <= 0) return;
+    HapticFeedback.selectionClick();
+    setState(() => _sel.contains(m.id) ? _sel.remove(m.id) : _sel.add(m.id));
+  }
+
+  Future<void> _copySel() async {
+    final txt = _picked.where((m) => m.type == 'text' && m.st != 'ghost' && (m.body ?? '').trim().isNotEmpty && StickerMsg.parse(m.body ?? '') == null).map((m) => m.body!.trim()).join('\n\n');
+    if (txt.isEmpty) {
+      toast(context, 'No text to copy in the chosen messages.');
+      return;
+    }
+    await Clipboard.setData(ClipboardData(text: txt));
+    if (!mounted) return;
+    setState(_sel.clear);
+    toast(context, 'Copied');
+  }
+
+  Future<void> _restoreSel() async {
+    final ids = _picked.where((m) => m.st == 'ghost').map((m) => m.id).toList();
+    if (ids.isEmpty) return;
+    final r = await PcApi.post(PcApi.room('delete'), {'ids': ids, 'scope': 'restore'});
+    if (!mounted) return;
+    if (!r.ok) {
+      toast(context, r.msg);
+      return;
+    }
+    setState(() {
+      for (final m in _msgs) {
+        if (ids.contains(m.id)) m.st = 'ok';
+      }
+      _sel.clear();
+    });
+    toast(context, '${ids.length} message${ids.length == 1 ? '' : 's'} restored');
+    _poll();
+  }
+
+  Future<void> _deleteSel(String scope) async {
+    final list = _picked.where((m) => m.st != 'ghost' && (scope == 'me' || m.mine)).toList();
+    if (list.isEmpty) return;
+    final n = list.length;
+    if (!await confirm(context, scope == 'all' ? 'Delete $n message${n == 1 ? '' : 's'} for everyone?' : 'Delete $n message${n == 1 ? '' : 's'} for you?', yes: 'Delete')) return;
+    final ids = list.map((m) => m.id).toList();
+    final r = await PcApi.post(PcApi.room('delete'), {'ids': ids, 'scope': scope});
+    if (!mounted) return;
+    if (!r.ok) {
+      toast(context, r.msg);
+      return;
+    }
+    setState(() {
+      for (final m in list) {
+        if (scope == 'me' || !_owner || !_showDeleted) {
+          _msgs.remove(m);
+          _ids.remove(m.id);
+        } else {
+          m.st = 'ghost';
+        }
+      }
+      _sel.clear();
+    });
+    toast(context, '$n message${n == 1 ? '' : 's'} deleted');
+  }
+
+  /// the top bar while messages are picked
+  Widget _selBar() {
+    final p = _picked;
+    final texts = p.any((m) => m.type == 'text' && m.st != 'ghost' && StickerMsg.parse(m.body ?? '') == null);
+    final live = p.where((m) => m.st != 'ghost').toList();
+    final allMine = live.isNotEmpty && live.every((m) => m.mine);
+    final ghosts = _owner && p.any((m) => m.st == 'ghost');
+    Widget btn(IconData ic, String tip, VoidCallback? on, {Color? color}) => Tooltip(
+          message: tip,
+          child: InkResponse(
+            onTap: on,
+            radius: 24,
+            child: Container(
+              width: 42,
+              height: 42,
+              margin: EdgeInsets.only(left: 4),
+              decoration: BoxDecoration(color: (color ?? C.accent2).withAlpha(on == null ? 12 : 34), borderRadius: BorderRadius.circular(14)),
+              child: Icon(ic, size: 21, color: on == null ? C.hint : (color ?? C.accent2)),
+            ),
+          ),
+        );
+    return Container(
+      margin: EdgeInsets.fromLTRB(10, 6, 10, 6),
+      padding: EdgeInsets.fromLTRB(4, 6, 8, 6),
+      decoration: BoxDecoration(
+        color: C.dark ? C.card2.withAlpha(235) : Colors.white.withAlpha(245),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: C.accent.withAlpha(110)),
+        boxShadow: [BoxShadow(color: Color(0x33000000), blurRadius: 16, offset: Offset(0, 6))],
+      ),
+      child: Row(children: [
+        IconButton(icon: Icon(Icons.close_rounded, color: C.text), tooltip: 'Cancel', onPressed: () => setState(_sel.clear)),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+            Text('${p.length} selected', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: C.text)),
+            Text('Tap messages to add or remove', style: TextStyle(fontSize: 11, color: C.muted)),
+          ]),
+        ),
+        btn(Icons.copy_rounded, 'Copy', texts ? _copySel : null),
+        if (ghosts) btn(Icons.restore_rounded, 'Restore', _restoreSel, color: Color(0xFF22C55E)),
+        btn(Icons.visibility_off_rounded, 'Delete for me', live.isNotEmpty ? () => _deleteSel('me') : null),
+        if (allMine) btn(Icons.delete_forever_rounded, 'Delete for everyone', () => _deleteSel('all'), color: C.danger),
+      ]),
+    );
+  }
+
   Future<void> _actions(PcMsg m) async {
     HapticFeedback.selectionClick();
     final isText = m.type == 'text';
@@ -830,6 +945,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
           ]),
           Divider(color: C.g2),
           if (m.st != 'ghost') _a(Icons.reply_rounded, 'Reply', 'reply'),
+          if (m.id > 0) _a(Icons.check_circle_outline_rounded, 'Select', 'select'),
           if (isText) _a(Icons.copy_rounded, 'Copy', 'copy'),
           if (m.type == 'gif' && (m.gif ?? '').startsWith('https://') && m.st != 'ghost') _a(Icons.bookmark_add_rounded, 'Save GIF', 'savegif'),
           if (m.id > 0 && m.st != 'ghost') _a(_stars.contains(m.id) ? Icons.star_border_rounded : Icons.star_rounded, _stars.contains(m.id) ? 'Remove star' : 'Star', 'star'),
@@ -846,6 +962,9 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
     if (action.startsWith('rx:')) {
       final r = await PcApi.post(PcApi.room('react'), {'id': m.id, 'emoji': action.substring(3)});
       if (mounted && r.ok) setState(() => m.rx = PcMsg.parseRx(r.json['rx']));
+    } else if (action == 'select') {
+      HapticFeedback.selectionClick();
+      setState(() => _sel.add(m.id));
     } else if (action == 'reply') {
       setState(() {
         _reply = m;
@@ -1136,9 +1255,14 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
     final colors = kThemes[_bgKey] ?? kThemes['aurora']!;
     final list = _shown;
     return PopScope(
-      canPop: !_owner,
+      canPop: !_owner && _sel.isEmpty,
       onPopInvokedWithResult: (didPop, _) {
-        if (!didPop && _owner) Navigator.of(context).pop();
+        if (didPop) return;
+        if (_sel.isNotEmpty) {
+          setState(_sel.clear);
+        } else if (_owner) {
+          Navigator.of(context).pop();
+        }
       },
       child: Listener(
         behavior: HitTestBehavior.translucent,
@@ -1151,7 +1275,7 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
           decoration: BoxDecoration(gradient: LinearGradient(colors: [Color(colors[0]), Color(colors[1])], begin: Alignment.topCenter, end: Alignment.bottomCenter)),
           child: SafeArea(
             child: Column(children: [
-              _header(),
+              AnimatedSwitcher(duration: Duration(milliseconds: 180), child: _sel.isNotEmpty ? KeyedSubtree(key: ValueKey('sel'), child: _selBar()) : KeyedSubtree(key: ValueKey('head'), child: _header())),
               AnimatedSize(
                 duration: Duration(milliseconds: 260),
                 curve: Curves.easeOutCubic,
@@ -1194,19 +1318,48 @@ class _RoomChatScreenState extends State<RoomChatScreen> with WidgetsBindingObse
                               if (newDay && m.ts > 0) _DayChip(dayLabel(m.ts)),
                               if (m.id == _unreadFrom && _hits.isEmpty) _UnreadLine(key: _unreadKey, count: _openUnread),
                               // the message a reply points to lights up for a moment after tapping the quote
-                              AnimatedContainer(
-                                duration: Duration(milliseconds: 450),
-                                curve: Curves.easeOut,
-                                padding: EdgeInsets.symmetric(horizontal: 4),
-                                decoration: BoxDecoration(color: lit ? C.accent.withAlpha(C.dark ? 70 : 45) : Colors.transparent, borderRadius: BorderRadius.circular(16)),
-                                child: PcBubble(m: m, showDeleted: _showDeleted, starred: _stars.contains(m.id), onLongPress: () => _actions(m), onRetry: () => _retryMsg(m), onJump: (id) => _jumpTo(id), onSwipeReply: () {
-                                  setState(() {
-                                    _reply = m;
-                                    _editing = null;
-                                  });
-                                  _focus.requestFocus();
-                                }),
-                              ),
+                              Builder(builder: (_) {
+                                final picking = _sel.isNotEmpty;
+                                final on = _sel.contains(m.id);
+                                final bubble = AnimatedContainer(
+                                  duration: Duration(milliseconds: 450),
+                                  curve: Curves.easeOut,
+                                  padding: EdgeInsets.symmetric(horizontal: 4),
+                                  decoration: BoxDecoration(color: lit ? C.accent.withAlpha(C.dark ? 70 : 45) : Colors.transparent, borderRadius: BorderRadius.circular(16)),
+                                  child: PcBubble(m: m, showDeleted: _showDeleted, starred: _stars.contains(m.id), onLongPress: () => picking ? _toggleSel(m) : _actions(m), onRetry: () => _retryMsg(m), onJump: (id) => _jumpTo(id), onSwipeReply: () {
+                                    setState(() {
+                                      _reply = m;
+                                      _editing = null;
+                                    });
+                                    _focus.requestFocus();
+                                  }),
+                                );
+                                if (!picking) return bubble;
+                                // picking messages: a tap anywhere on the row adds / removes it
+                                return GestureDetector(
+                                  behavior: HitTestBehavior.opaque,
+                                  onTap: () => _toggleSel(m),
+                                  onLongPress: () => _toggleSel(m),
+                                  child: AnimatedContainer(
+                                    duration: Duration(milliseconds: 160),
+                                    margin: EdgeInsets.symmetric(vertical: 1),
+                                    decoration: BoxDecoration(color: on ? C.accent.withAlpha(C.dark ? 60 : 38) : Colors.transparent, borderRadius: BorderRadius.circular(16)),
+                                    child: Row(children: [
+                                      Padding(
+                                        padding: EdgeInsets.only(left: 6, right: 2),
+                                        child: AnimatedContainer(
+                                          duration: Duration(milliseconds: 160),
+                                          width: 22,
+                                          height: 22,
+                                          decoration: BoxDecoration(shape: BoxShape.circle, gradient: on ? C.grad : null, border: on ? null : Border.all(color: C.hint, width: 1.6)),
+                                          child: on ? Icon(Icons.check_rounded, size: 15, color: Colors.white) : null,
+                                        ),
+                                      ),
+                                      Expanded(child: IgnorePointer(child: bubble)),
+                                    ]),
+                                  ),
+                                );
+                              }),
                             ]);
                           },
                         ),
@@ -1467,41 +1620,44 @@ class _DayChip extends StatelessWidget {
       );
 }
 
-/// Saved GIFs of the private chat (the owner has one list for all rooms, a guest one per room).
-/// Kept on the phone too, so the Saved tab opens at once.
+/// GIFs of the private chat: collections the admin made for this room, "This chat" (every GIF sent here)
+/// and "Saved" (own list: the owner one list for all rooms, a guest one per room). Kept on the phone, so it opens at once.
 class PcGifs {
-  static List<Map> list = _read();
-  static String get _key => PcApi.owner ? 'pc_gifs_owner' : 'pc_gifs_${PcApi.roomId}';
+  static Map data = _read();
+  static String get _key => 'pc_gifs3_${PcApi.roomId}';
 
-  static List<Map> _read() {
+  static Map _read() {
     try {
-      return ((jsonDecode(Session.getString(PcApi.owner ? 'pc_gifs_owner' : 'pc_gifs_${PcApi.roomId}') ?? '[]') as List).whereType<Map>()).toList();
+      final j = jsonDecode(Session.getString('pc_gifs3_${PcApi.roomId}') ?? '{}');
+      return j is Map ? j : {};
     } catch (_) {
-      return [];
+      return {};
     }
   }
 
+  static List<Map> packs() => ((data['packs'] as List?) ?? const []).whereType<Map>().toList();
+  static List<Map> list(String which) => ((data[which] as List?) ?? const []).whereType<Map>().toList();
+
   static Future<String?> _take(ApiRes r) async {
     if (!r.ok) return r.msg;
-    if (r.data is Map && (r.data as Map)['gifs'] is List) {
-      list = ((r.data as Map)['gifs'] as List).whereType<Map>().toList();
-      await Session.setString(_key, jsonEncode(list));
+    if (r.data is Map && (r.data as Map).containsKey('saved')) {
+      data = r.data as Map;
+      await Session.setString(_key, jsonEncode(data));
     }
     return null;
   }
 
   static Future<void> refresh() async {
-    list = _read();
+    data = _read();
     await _take(await PcApi.get(PcApi.room('x/gifs')));
   }
 
-  /// keep a GIF seen in the chat or in the search
+  /// keep a GIF in my Saved list
   static Future<String?> save(String url) async => _take(await PcApi.post(PcApi.room('x/gifs'), {'url': url}));
 
-  /// add a GIF from the phone
-  static Future<String?> upload(File f) async {
-    if (await f.length() > 8 * 1048576) return 'A GIF can be up to 8 MB.';
-    return _take(await PcApi.upload(PcApi.room('x/gifs'), {}, [f]));
+  /// a GIF was sent here: the server puts it in "This chat" and in my Saved list
+  static Future<void> sent(String url) async {
+    await PcApi.post(PcApi.room('x/gifs/sent'), {'url': url});
   }
 
   static Future<String?> remove(int id) async => _take(await PcApi.post(PcApi.room('x/gifs/remove'), {'id': id}));
@@ -1521,14 +1677,14 @@ class _GifSheetState extends State<_GifSheet> {
   bool _loading = true;
   bool _loadingMore = false;
   bool _more = false;
+  bool _searched = false;
   int _offset = 0;
   int _token = 0; // ignores answers that belong to an older search
   String _err = '';
   String _query = '';
   bool _adult = Session.getBool('gif_adult');
   static const _page = 30;
-  bool _saved = Session.getBool('gif_tab_saved');   // the tab used last time
-  bool _adding = false;
+  String _tab = '';   // p:<id> = an admin collection | chat | saved | search
 
   @override
   void initState() {
@@ -1536,102 +1692,31 @@ class _GifSheetState extends State<_GifSheet> {
     _scroll.addListener(() {
       if (_scroll.hasClients && _scroll.position.pixels > _scroll.position.maxScrollExtent - 400) _loadMore();
     });
-    _go('');
+    _pickTab();
     PcGifs.refresh().then((_) {
-      if (mounted) setState(() {});
+      if (!mounted) return;
+      setState(_pickTab);
     });
   }
 
-  void _tab(bool saved) {
-    setState(() => _saved = saved);
-    Session.setBool('gif_tab_saved', saved);
+  /// first time: the first admin collection; otherwise the tab is kept while it still exists
+  void _pickTab() {
+    final ids = PcGifs.packs().map((p) => 'p:${p['id']}').toList();
+    if (_tab.isNotEmpty && (ids.contains(_tab) || !_tab.startsWith('p:'))) return;
+    _tab = ids.isNotEmpty ? ids.first : (PcGifs.list('chat').isNotEmpty ? 'chat' : 'search');
+    if (_tab == 'search') _startSearch();
   }
 
-  Future<void> _add() async {
-    if (_adding) return;
-    final r = await AwayGuard.run(() => FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['gif', 'webp']));
-    final path = (r == null || r.files.isEmpty) ? null : r.files.first.path;
-    if (path == null || !mounted) return;
-    setState(() => _adding = true);
-    final err = await PcGifs.upload(File(path));
-    if (!mounted) return;
-    setState(() => _adding = false);
-    toast(context, err ?? 'GIF added');
+  void _startSearch() {
+    if (_searched) return;
+    _searched = true;
+    _go('');
   }
 
-  Future<void> _saveFromSearch(String url) async {
-    HapticFeedback.selectionClick();
-    final err = await PcGifs.save(url);
-    if (mounted) {
-      toast(context, err ?? 'Saved to your GIFs');
-      setState(() {});
-    }
+  void _open(String t) {
+    setState(() => _tab = t);
+    if (t == 'search') _startSearch();
   }
-
-  Future<void> _remove(Map g) async {
-    final ok = await confirm(context, 'Remove this GIF from your saved GIFs?', yes: 'Remove');
-    if (!ok) return;
-    final err = await PcGifs.remove((g['id'] as num).toInt());
-    if (mounted) {
-      if (err != null) toast(context, err);
-      setState(() {});
-    }
-  }
-
-  Widget _savedGrid() {
-    final list = PcGifs.list;
-    return GridView.builder(
-      padding: EdgeInsets.fromLTRB(12, 0, 12, 12),
-      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 3, crossAxisSpacing: 6, mainAxisSpacing: 6),
-      itemCount: list.length + 1,
-      itemBuilder: (_, i) {
-        if (i == 0) {
-          return GestureDetector(
-            onTap: _add,
-            child: Container(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(colors: [C.accent.withAlpha(40), C.accent2.withAlpha(30)], begin: Alignment.topLeft, end: Alignment.bottomRight),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: C.accent.withAlpha(120)),
-              ),
-              child: Center(
-                child: _adding
-                    ? SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2, color: C.accent2))
-                    : Column(mainAxisSize: MainAxisSize.min, children: [
-                        Icon(Icons.add_photo_alternate_rounded, color: C.accent, size: 28),
-                        SizedBox(height: 4),
-                        Text('Add GIF', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 12, color: C.accent)),
-                      ]),
-              ),
-            ),
-          );
-        }
-        final g = list[i - 1];
-        return GestureDetector(
-          onTap: () => Navigator.pop(context, g['url'].toString()),
-          onLongPress: () => _remove(g),
-          child: ClipRRect(borderRadius: BorderRadius.circular(12), child: Image.network(g['url'].toString(), fit: BoxFit.cover, gaplessPlayback: true, errorBuilder: (_, __, ___) => Container(color: C.g2, child: Icon(Icons.broken_image_outlined, color: C.hint)))),
-        );
-      },
-    );
-  }
-
-  Widget _seg(String label, IconData ic, bool on, VoidCallback tap) => Expanded(
-        child: GestureDetector(
-          onTap: tap,
-          child: AnimatedContainer(
-            duration: Duration(milliseconds: 160),
-            height: 36,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(color: on ? C.accent : Colors.transparent, borderRadius: BorderRadius.circular(12)),
-            child: Row(mainAxisSize: MainAxisSize.min, children: [
-              Icon(ic, size: 17, color: on ? Colors.white : C.muted),
-              SizedBox(width: 6),
-              Text(label, style: TextStyle(fontWeight: FontWeight.w800, fontSize: 13, color: on ? Colors.white : C.muted)),
-            ]),
-          ),
-        ),
-      );
 
   Future<void> _toggleAdult() async {
     if (!_adult) {
@@ -1649,6 +1734,27 @@ class _GifSheetState extends State<_GifSheet> {
     _q.dispose();
     _scroll.dispose();
     super.dispose();
+  }
+
+  Future<void> _saveUrl(String url) async {
+    HapticFeedback.selectionClick();
+    final err = await PcGifs.save(url);
+    if (mounted) {
+      toast(context, err ?? 'Saved to your GIFs');
+      setState(() {});
+    }
+  }
+
+  Future<void> _remove(Map g) async {
+    final id = (g['id'] as num?)?.toInt() ?? 0;
+    if (id <= 0) return;
+    final ok = await confirm(context, 'Remove this GIF from your saved GIFs?', yes: 'Remove');
+    if (!ok) return;
+    final err = await PcGifs.remove(id);
+    if (mounted) {
+      if (err != null) toast(context, err);
+      setState(() {});
+    }
   }
 
   /// One page of results. Returns items, an error text and whether more pages exist.
@@ -1735,72 +1841,153 @@ class _GifSheetState extends State<_GifSheet> {
     });
   }
 
+  Widget _gif(String url, {VoidCallback? onLong}) => GestureDetector(
+        onTap: () => Navigator.pop(context, url),
+        onLongPress: onLong,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: Container(
+            color: C.g1,
+            child: Image.network(url, fit: BoxFit.cover, gaplessPlayback: true, cacheWidth: 360,
+                loadingBuilder: (_, child, p) => p == null ? child : Center(child: SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: C.accent2))),
+                errorBuilder: (_, __, ___) => Center(child: Icon(Icons.broken_image_outlined, color: C.hint))),
+          ),
+        ),
+      );
+
+  Widget _grid(List<Map> list, {bool saved = false, String empty = ''}) {
+    if (list.isEmpty) {
+      return Center(child: Padding(padding: EdgeInsets.all(28), child: Text(empty, textAlign: TextAlign.center, style: TextStyle(color: C.muted, height: 1.4))));
+    }
+    return GridView.builder(
+      padding: EdgeInsets.fromLTRB(12, 4, 12, 12),
+      cacheExtent: 400,
+      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 3, crossAxisSpacing: 6, mainAxisSpacing: 6),
+      itemCount: list.length,
+      itemBuilder: (_, i) {
+        final url = list[i]['url'].toString();
+        return _gif(url, onLong: saved ? () => _remove(list[i]) : () => _saveUrl(url));
+      },
+    );
+  }
+
+  Widget _chip(String t, String icon, String label, int? count) {
+    final on = _tab == t;
+    return GestureDetector(
+      onTap: () => _open(t),
+      child: AnimatedContainer(
+        duration: Duration(milliseconds: 160),
+        height: 36,
+        margin: EdgeInsets.only(right: 6),
+        padding: EdgeInsets.symmetric(horizontal: 12),
+        decoration: BoxDecoration(
+          gradient: on ? LinearGradient(colors: [C.accent, C.accent2]) : null,
+          color: on ? null : C.g1,
+          borderRadius: BorderRadius.circular(18),
+          border: on ? null : Border.all(color: C.line),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Text(icon, style: TextStyle(fontSize: 15)),
+          SizedBox(width: 5),
+          ConstrainedBox(constraints: BoxConstraints(maxWidth: 120), child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontWeight: FontWeight.w800, fontSize: 12.5, color: on ? Colors.white : C.text))),
+          if (count != null && count > 0) ...[
+            SizedBox(width: 5),
+            Text('$count', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 11, color: on ? Colors.white70 : C.muted)),
+          ],
+        ]),
+      ),
+    );
+  }
+
+  Widget _searchBody() => Column(children: [
+        Padding(
+          padding: EdgeInsets.fromLTRB(14, 4, 14, 8),
+          child: Row(children: [
+            Expanded(child: TextField(controller: _q, onChanged: (v) => _deb.run(() => _go(v.trim())), decoration: InputDecoration(hintText: 'Search GIFs', prefixIcon: Icon(Icons.search_rounded, color: C.hint)))),
+            SizedBox(width: 10),
+            GestureDetector(
+              onTap: _toggleAdult,
+              child: AnimatedContainer(
+                duration: Duration(milliseconds: 180),
+                padding: EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+                decoration: BoxDecoration(color: _adult ? C.danger.withAlpha(46) : C.g1, borderRadius: BorderRadius.circular(20), border: Border.all(color: _adult ? C.danger : C.line, width: _adult ? 1.6 : 1)),
+                child: Text(_adult ? '18+ ON' : '18+ OFF', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 12, color: _adult ? C.danger : C.muted)),
+              ),
+            ),
+          ]),
+        ),
+        Expanded(
+          child: _loading
+              ? Center(child: CircularProgressIndicator(color: C.accent2))
+              : _err.isNotEmpty
+                  ? Center(child: Padding(padding: EdgeInsets.all(24), child: Text(_err, textAlign: TextAlign.center, style: TextStyle(color: C.muted))))
+                  : GridView.builder(
+                      controller: _scroll,
+                      padding: EdgeInsets.fromLTRB(12, 0, 12, 12),
+                      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 3, crossAxisSpacing: 6, mainAxisSpacing: 6),
+                      itemCount: _items.length + (_loadingMore ? 3 : 0),
+                      itemBuilder: (_, i) {
+                        if (i >= _items.length) {
+                          return Container(decoration: BoxDecoration(color: C.g2, borderRadius: BorderRadius.circular(10)), child: Center(child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: C.accent2))));
+                        }
+                        final url = _items[i]['url'].toString();
+                        return GestureDetector(
+                          onTap: () => Navigator.pop(context, url),
+                          onLongPress: () => _saveUrl(url),
+                          child: ClipRRect(borderRadius: BorderRadius.circular(10), child: Image.network(_items[i]['preview'].toString(), fit: BoxFit.cover, errorBuilder: (_, __, ___) => Container(color: C.g2))),
+                        );
+                      },
+                    ),
+        ),
+      ]);
+
   @override
   Widget build(BuildContext context) {
+    final packs = PcGifs.packs();
+    final chat = PcGifs.list('chat'), saved = PcGifs.list('saved');
+    Widget body;
+    String hint = '';
+    if (_tab.startsWith('p:')) {
+      final p = packs.where((x) => 'p:${x['id']}' == _tab).firstOrNullX;
+      body = _grid(((p?['gifs'] as List?) ?? const []).whereType<Map>().toList(), empty: 'No GIFs in this collection yet.');
+      hint = 'Tap to send · hold to save';
+    } else if (_tab == 'chat') {
+      body = _grid(chat, empty: 'GIFs sent in this chat show here.');
+      hint = 'Every GIF sent in this chat · hold to save';
+    } else if (_tab == 'saved') {
+      body = _grid(saved, saved: true, empty: 'GIFs you send are saved here.\nHold a GIF anywhere to save it.');
+      hint = 'Your GIFs · hold to remove';
+    } else {
+      body = _searchBody();
+    }
     return Padding(
       padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
       child: SizedBox(
         height: MediaQuery.of(context).size.height * .6,
         child: Column(children: [
-          Padding(
-            padding: EdgeInsets.fromLTRB(14, 14, 14, 0),
-            child: Container(
-              padding: EdgeInsets.all(3),
-              decoration: BoxDecoration(color: C.g1, borderRadius: BorderRadius.circular(15), border: Border.all(color: C.line)),
-              child: Row(children: [
-                _seg('Search', Icons.search_rounded, !_saved, () => _tab(false)),
-                _seg('Saved${PcGifs.list.isEmpty ? '' : ' · ${PcGifs.list.length}'}', Icons.bookmark_rounded, _saved, () => _tab(true)),
-              ]),
-            ),
-          ),
-          if (_saved)
-            Padding(
-              padding: EdgeInsets.fromLTRB(16, 10, 16, 8),
-              child: Text('Tap to send · hold to remove · + adds a GIF from your phone', style: TextStyle(fontSize: 11.5, color: C.muted)),
-            ),
-          if (_saved) Expanded(child: _savedGrid()),
-          if (!_saved) Padding(
-            padding: EdgeInsets.fromLTRB(14, 10, 14, 8),
-            child: Row(children: [
-              Expanded(child: TextField(controller: _q, onChanged: (v) => _deb.run(() => _go(v.trim())), decoration: InputDecoration(hintText: 'Search GIFs', prefixIcon: Icon(Icons.search_rounded, color: C.hint)))),
-              SizedBox(width: 10),
-              GestureDetector(
-                onTap: _toggleAdult,
-                child: AnimatedContainer(
-                  duration: Duration(milliseconds: 180),
-                  padding: EdgeInsets.symmetric(horizontal: 12, vertical: 11),
-                  decoration: BoxDecoration(color: _adult ? C.danger.withAlpha(46) : C.g1, borderRadius: BorderRadius.circular(20), border: Border.all(color: _adult ? C.danger : C.line, width: _adult ? 1.6 : 1)),
-                  child: Text(_adult ? '18+ ON' : '18+ OFF', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 12, color: _adult ? C.danger : C.muted)),
-                ),
-              ),
+          SizedBox(height: 10),
+          Container(width: 42, height: 4, decoration: BoxDecoration(color: C.g3, borderRadius: BorderRadius.circular(4))),
+          SizedBox(height: 10),
+          SizedBox(
+            height: 36,
+            child: ListView(scrollDirection: Axis.horizontal, padding: EdgeInsets.symmetric(horizontal: 12), children: [
+              for (final p in packs) _chip('p:${p['id']}', (p['icon'] ?? '🎞️').toString(), (p['name'] ?? 'GIFs').toString(), ((p['gifs'] as List?) ?? const []).length),
+              _chip('chat', '💬', 'This chat', chat.length),
+              _chip('saved', '⭐', 'Saved', saved.length),
+              _chip('search', '🔍', 'Search', null),
             ]),
           ),
-          if (!_saved) Expanded(
-            child: _loading
-                ? Center(child: CircularProgressIndicator(color: C.accent2))
-                : _err.isNotEmpty
-                    ? Center(child: Padding(padding: EdgeInsets.all(24), child: Text(_err, textAlign: TextAlign.center, style: TextStyle(color: C.muted))))
-                    : GridView.builder(
-                        controller: _scroll,
-                        padding: EdgeInsets.fromLTRB(12, 0, 12, 12),
-                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 3, crossAxisSpacing: 6, mainAxisSpacing: 6),
-                        itemCount: _items.length + (_loadingMore ? 3 : 0),
-                        itemBuilder: (_, i) {
-                          if (i >= _items.length) {
-                            return Container(decoration: BoxDecoration(color: C.g2, borderRadius: BorderRadius.circular(10)), child: Center(child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: C.accent2))));
-                          }
-                          return GestureDetector(
-                            onTap: () => Navigator.pop(context, _items[i]['url'].toString()),
-                            onLongPress: () => _saveFromSearch(_items[i]['url'].toString()),
-                            child: ClipRRect(borderRadius: BorderRadius.circular(10), child: Image.network(_items[i]['preview'].toString(), fit: BoxFit.cover, errorBuilder: (_, __, ___) => Container(color: C.g2))),
-                          );
-                        },
-                      ),
-          ),
+          if (hint.isNotEmpty) Padding(padding: EdgeInsets.fromLTRB(16, 8, 16, 4), child: Align(alignment: Alignment.centerLeft, child: Text(hint, style: TextStyle(fontSize: 11.5, color: C.muted)))),
+          SizedBox(height: hint.isEmpty ? 8 : 0),
+          Expanded(child: body),
         ]),
       ),
     );
   }
+}
+
+extension _FirstOrNullX<T> on Iterable<T> {
+  T? get firstOrNullX => isEmpty ? null : first;
 }
 
 
