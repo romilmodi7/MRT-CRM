@@ -63,6 +63,9 @@ String mimeOf(String path) => lookupMimeType(path) ?? 'application/octet-stream'
 class Api {
   static void Function()? onUnauthorized;
 
+  /// for downloads done elsewhere (stickers)
+  static Map<String, String> headers() => _h(json: false);
+
   static Map<String, String> _h({bool json = true}) {
     final t = Session.token;
     return {
@@ -181,6 +184,10 @@ class PcApi {
   }
 
   static Uri _u(String path, [Map<String, String>? q]) => Uri.parse(kPcApi + path).replace(queryParameters: q);
+
+  /// for downloads done elsewhere (stickers)
+  static Uri uri(String path) => _u(path);
+  static Map<String, String> headers() => _h(json: false);
 
   static Future<ApiRes> get(String path, [Map<String, String>? q]) => _run(() => http.get(_u(path, q), headers: _h()));
 
