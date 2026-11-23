@@ -78,6 +78,7 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
       final me = d['me'];
       final name = me is Map ? (me['name'] ?? me['username'] ?? u).toString() : u;
       await Session.save(d['token'].toString(), name);
+      await Session.setBool('lookup', me is Map && me['lookup'] == true); // project lookup (main admins)
       await Session.clearRoom();
       Push.sync();
       if (!mounted) return;
