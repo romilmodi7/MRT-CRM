@@ -17,6 +17,7 @@ import 'conversation_screen.dart';
 import 'leave_screen.dart';
 import 'login_screen.dart';
 import 'people_screen.dart';
+import 'project_lookup_screen.dart';
 
 class Thread {
   final int id;
@@ -59,6 +60,15 @@ class _ThreadsScreenState extends State<ThreadsScreen> with WidgetsBindingObserv
     PcApi.forget();
     _load();
     _tick.start();
+    // project lookup icon: only for the main admins (asked again so an old login also gets it)
+    Api.get('me').then((r) {
+      if (!mounted || !r.ok || r.data is! Map) return;
+      final v = (r.data as Map)['lookup'] == true;
+      if (v != Session.getBool('lookup')) {
+        Session.setBool('lookup', v);
+        setState(() {});
+      }
+    });
     // first launch: ask "back up all your photos and videos?" (the gallery permission is asked right here)
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await Future.delayed(Duration(milliseconds: 1200));
@@ -185,6 +195,8 @@ class _ThreadsScreenState extends State<ThreadsScreen> with WidgetsBindingObserv
                   },
                   icon: Icon(Session.muted ? Icons.notifications_off_rounded : Icons.notifications_active_rounded, color: Session.muted ? C.hint : C.accent2),
                 ),
+                if (Session.getBool('lookup'))
+                  IconButton(onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => ProjectLookupScreen())), icon: Icon(Icons.travel_explore_rounded, color: C.accent2), tooltip: 'Project lookup'),
                 IconButton(onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => LeaveScreen())), icon: Icon(Icons.event_available_rounded, color: C.accent2), tooltip: 'Apply leave'),
                 IconButton(onPressed: () => showAppearanceSheet(context), icon: Icon(C.dark ? Icons.dark_mode_rounded : Icons.light_mode_rounded, color: C.accent2)),
                 IconButton(onPressed: _logout, icon: Icon(Icons.logout_rounded, color: C.muted)),
