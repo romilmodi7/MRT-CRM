@@ -338,6 +338,105 @@ Future<bool> confirm(BuildContext c, String msg, {String yes = 'Yes', String no 
   return r == true;
 }
 
+/// Owner's secret key for the private chat. [isNew] = first time (typed twice).
+/// [submit] gets the key + "remember on this phone" and returns an error text, or null when it worked.
+Future<bool> askSecretKey(BuildContext c, {required bool isNew, required Future<String?> Function(String key, bool remember) submit}) async {
+  final k1 = TextEditingController();
+  final k2 = TextEditingController();
+  var remember = true, busy = false, hide = true;
+  String? err;
+  final r = await showDialog<bool>(
+    context: c,
+    barrierDismissible: false,
+    builder: (dc) => StatefulBuilder(builder: (dc, set) {
+      Future<void> go() async {
+        final a = k1.text;
+        if (busy || a.isEmpty) return;
+        if (isNew && a.length < 8) {
+          set(() => err = 'The secret key needs at least 8 characters.');
+          return;
+        }
+        if (isNew && a != k2.text) {
+          set(() => err = 'The two keys are not the same.');
+          return;
+        }
+        set(() {
+          busy = true;
+          err = null;
+        });
+        final e = await submit(a, remember);
+        if (!dc.mounted) return;
+        if (e == null) {
+          Navigator.pop(dc, true);
+        } else {
+          set(() {
+            busy = false;
+            err = e;
+          });
+        }
+      }
+
+      return AlertDialog(
+        backgroundColor: C.card2,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+        title: Text(isNew ? 'Make your secret key' : 'Secret key'),
+        content: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(
+              isNew
+                  ? 'Every private message, name and file is locked with this key. It is not saved anywhere on the server. If you forget it, nobody can open the chats again — write it down.'
+                  : 'Type your secret key to open the private chats.',
+              style: TextStyle(color: C.muted, fontSize: 13.5),
+            ),
+            SizedBox(height: 12),
+            TextField(
+              controller: k1,
+              autofocus: true,
+              obscureText: hide,
+              enableSuggestions: false,
+              autocorrect: false,
+              decoration: InputDecoration(
+                hintText: 'Secret key',
+                suffixIcon: IconButton(icon: Icon(hide ? Icons.visibility_rounded : Icons.visibility_off_rounded), onPressed: () => set(() => hide = !hide)),
+              ),
+              onSubmitted: (_) {
+                if (!isNew) go();
+              },
+            ),
+            if (isNew)
+              TextField(
+                controller: k2,
+                obscureText: hide,
+                enableSuggestions: false,
+                autocorrect: false,
+                decoration: InputDecoration(hintText: 'Type it again'),
+                onSubmitted: (_) => go(),
+              ),
+            CheckboxListTile(
+              value: remember,
+              onChanged: busy ? null : (v) => set(() => remember = v ?? true),
+              contentPadding: EdgeInsets.zero,
+              controlAffinity: ListTileControlAffinity.leading,
+              title: Text('Remember on this phone', style: TextStyle(fontSize: 14)),
+            ),
+            if (err != null) Text(err!, style: TextStyle(color: Colors.redAccent, fontSize: 13)),
+          ]),
+        ),
+        actions: [
+          TextButton(onPressed: busy ? null : () => Navigator.pop(dc, false), child: Text('Cancel')),
+          TextButton(
+            onPressed: busy ? null : go,
+            child: busy
+                ? SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                : Text(isNew ? 'Make key' : 'Open', style: TextStyle(color: C.accent2, fontWeight: FontWeight.w700)),
+          ),
+        ],
+      );
+    }),
+  );
+  return r == true;
+}
+
 Future<String?> askText(BuildContext c, String title, {String initial = '', String hint = '', bool obscure = false}) async {
   final ctl = TextEditingController(text: initial);
   final r = await showDialog<String>(

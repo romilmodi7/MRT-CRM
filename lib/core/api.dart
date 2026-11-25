@@ -146,6 +146,25 @@ class PcApi {
     owner = true;
   }
 
+  /// false = the owner's secret key has not been made yet (told by the unlock answer)
+  static bool hasKey = true;
+
+  /// Owner's secret key (after the PIN): gives a token that carries this phone's key slip.
+  /// [slip] = the one kept from an earlier "Remember on this phone". Returns null when it worked, else the error text.
+  static Future<String?> useKey({String? key, String? slip, bool remember = false}) async {
+    final r = await post('key', slip != null ? {'slip': slip} : {'key': key, 'remember': remember});
+    if (r.ok && r.data is Map && (r.data as Map)['token'] != null) {
+      token = (r.data as Map)['token'].toString();
+      owner = true;
+      hasKey = true;
+      final s = (r.data as Map)['slip'];
+      if (s is String && s.isNotEmpty) await Session.setString('pc_slip', s);
+      return null;
+    }
+    if (slip != null && r.code != 0) await Session.remove('pc_slip');   // expired / key changed: ask for the key again
+    return r.msg;
+  }
+
   static void useGuest(String t) {
     token = t;
     owner = false;
