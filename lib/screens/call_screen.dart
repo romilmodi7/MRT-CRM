@@ -157,7 +157,13 @@ class _CallScreenState extends State<CallScreen> with SingleTickerProviderStateM
       final offer = await _pc!.createOffer();
       await _pc!.setLocalDescription(offer);
       if (_closing) return;
-      final r = await _api.post('start', {'sdp': offer.sdp, if (!widget.pc) 'thread': widget.thread, if (widget.video) 'video': true});
+      final body = {'sdp': offer.sdp, if (!widget.pc) 'thread': widget.thread, if (widget.video) 'video': true};
+      var r = await _api.post('start', body);
+      for (var i = 0; !r.ok && !_closing && i < 2 && (r.code == 0 || r.code == 429 || r.code >= 500); i++) {
+        await Future.delayed(Duration(milliseconds: 1500 * (i + 1)));
+        if (_closing) return;
+        r = await _api.post('start', body);
+      }
       if (!r.ok || r.data is! Map) {
         final busy = r.json['busy'] == true;
         if (busy) CallNative.tone('busy');
@@ -197,9 +203,20 @@ class _CallScreenState extends State<CallScreen> with SingleTickerProviderStateM
       await _drainRemote();
       final ans = await _pc!.createAnswer();
       await _pc!.setLocalDescription(ans);
-      final r = await _api.post('$_id/answer', {'sdp': ans.sdp});
+      // A slow or busy server must not drop the call: try again for a few seconds before giving up.
+      var r = await _api.post('$_id/answer', {'sdp': ans.sdp});
+      for (var i = 0; !r.ok && !_closing && i < 6 && (r.code == 0 || r.code == 429 || r.code >= 500); i++) {
+        await Future.delayed(Duration(milliseconds: 800 * (i + 1)));
+        if (_closing) return;
+        r = await _api.post('$_id/answer', {'sdp': ans.sdp});
+      }
+      if (_closing) return;
       if (!r.ok) {
-        _finish('The call has ended.');
+        if (r.code == 200 || r.code == 404) {
+          _finish('The call has ended.');   // the caller hung up before the answer arrived
+        } else {
+          _hangup(note: r.msg);            // tell the caller too, so his phone does not keep ringing
+        }
         return;
       }
       _setPoll(1);
