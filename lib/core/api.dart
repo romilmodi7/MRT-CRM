@@ -38,6 +38,7 @@ class ApiRes {
   bool get locked => json['locked'] == true;
 
   String get msg {
+    if (code == 429) return 'The server is busy right now. Please wait a moment and try again.';
     final m = json['msg'];
     if (m is String && m.isNotEmpty) {
       return RegExp(r'/home/|/var/|/usr/|\.php|SQLSTATE|vendor/|storage/|Stack trace', caseSensitive: false).hasMatch(m) ? 'The server had a problem. Please try again in a moment.' : m;
