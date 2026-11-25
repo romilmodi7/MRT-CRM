@@ -145,16 +145,35 @@ class _ThreadsScreenState extends State<ThreadsScreen> with WidgetsBindingObserv
     if (!mounted || seq != _seq || _q.text.trim() != q) return;
     if (r.ok && r.data is Map && (r.data as Map)['token'] != null) {
       PcApi.useOwner((r.data as Map)['token'].toString());
+      PcApi.hasKey = (r.data as Map)['has_key'] != false;
       HapticFeedback.mediumImpact();
       setState(() => _door = q);
     }
   }
 
-  void _openPrivate() {
+  Future<void> _openPrivate() async {
     if (_door == null || PcApi.token == null) return;
     _q.clear();
     setState(() => _door = null);
+    if (!await _privateKey()) {
+      PcApi.forget();
+      return;
+    }
+    if (!mounted) return;
     Navigator.of(context).push(MaterialPageRoute(builder: (_) => RoomsScreen()));
+  }
+
+  /// The secret key that unlocks the private messages: the slip kept on this phone opens it by itself,
+  /// otherwise it is asked (and made, the very first time).
+  Future<bool> _privateKey() async {
+    final slip = Session.getString('pc_slip');
+    if (slip != null && slip.isNotEmpty && await PcApi.useKey(slip: slip) == null) return true;
+    if (!mounted) return false;
+    return askSecretKey(context, isNew: !PcApi.hasKey, submit: (k, remember) async {
+      final e = await PcApi.useKey(key: k, remember: remember);
+      if (e == null && !remember) await Session.remove('pc_slip');
+      return e;
+    });
   }
 
   Future<void> _logout() async {
@@ -162,6 +181,7 @@ class _ThreadsScreenState extends State<ThreadsScreen> with WidgetsBindingObserv
     await Push.off();
     Api.post('logout');
     await Session.clearEmployee();
+    await Session.remove('pc_slip');
     PcApi.forget();
     if (!mounted) return;
     Navigator.of(context).pushAndRemoveUntil(MaterialPageRoute(builder: (_) => LoginScreen()), (_) => false);
