@@ -16,6 +16,7 @@ import 'theme.dart';
 /// Phone notifications (Firebase Cloud Messaging).
 ///  - app closed / in background: Android shows the notification by itself (sound, photo, urgent style are chosen by the server)
 ///  - app open: a small banner at the top + a short sound (unless the sound is switched off)
+///  - private chat (Desk): no notification and no banner at all; only an incoming call rings ("Incoming call", no name)
 ///  - the phone registers its address with the server for the employee login or the private room login
 class Push {
   static final messengerKey = GlobalKey<ScaffoldMessengerState>();
@@ -88,7 +89,8 @@ class Push {
         Calls.check();   // the call screen opens by itself
         return;
       }
-      final key = d['kind'] == 'private' ? 'pc:${d['room']}' : 'chat:${d['thread']}';
+      if (d['kind'] == 'private') return;   // private chat: never a banner or sound (the server does not send these any more)
+      final key = 'chat:${d['thread']}';
       if (here == key) return;
       final title = r.notification?.title ?? '';
       final body = r.notification?.body ?? '';
