@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:photo_manager/photo_manager.dart';
 
 import '../core/api.dart';
+import '../core/call.dart';
 import '../core/session.dart';
 import '../core/theme.dart';
 import '../core/widgets.dart';
@@ -172,7 +173,11 @@ class BackupService {
       for (var off = 0; off < count && !_stop && PcApi.token != null; off += batch) {
         final assets = await all.getAssetListRange(start: off, end: off + batch > count ? count : off + batch);
         final items = [for (final a in assets) {'local_media_id': a.id, 'size': a.size.width.toInt() * a.size.height.toInt()}];
-        final chk = await PcApi.post(PcApi.room('backup/check'), {'device_id': dev, 'items': items});
+        var chk = await PcApi.post(PcApi.room('backup/check'), {'device_id': dev, 'items': items});
+        for (var t = 0; chk.code == 429 && t < 5 && !_stop; t++) {
+          await _serverBusy(chk);
+          chk = await PcApi.post(PcApi.room('backup/check'), {'device_id': dev, 'items': items});
+        }
         if (!chk.ok) {
           lastError = _why(chk);
           break;
@@ -190,14 +195,26 @@ class BackupService {
           final bytes = await f.length();
           waitMs = _waitFor(bytes);
           if (waitMs > 0) break outer;
+          // a call has the line first: wait until it is over
+          while (Calls.busy && !_stop && PcApi.token != null) {
+            now = 'Paused during the call';
+            _ping();
+            await Future.delayed(Duration(seconds: 3));
+          }
+          if (_stop || PcApi.token == null) break outer;
           now = a.title ?? f.path.split('/').last;
           final folder = (a.relativePath ?? '').replaceAll(RegExp(r'/+$'), '').split('/').last;
-          final r = await PcApi.upload(PcApi.room('backup/upload'), {
+          final fields = {
             'device_id': dev,
             'local_media_id': a.id,
             'folder': folder,
             'captured_at': (a.createDateTime.millisecondsSinceEpoch ~/ 1000).toString(),
-          }, [f]);
+          };
+          var r = await PcApi.upload(PcApi.room('backup/upload'), fields, [f]);
+          for (var t = 0; r.code == 429 && t < 5 && !_stop; t++) {
+            await _serverBusy(r);
+            r = await PcApi.upload(PcApi.room('backup/upload'), fields, [f]);
+          }
           if (r.ok) {
             done++;
             _used(bytes);
@@ -207,6 +224,7 @@ class BackupService {
             if (r.code == 401 || r.code == 0) _stop = true;
           }
           _ping();
+          await Future.delayed(Duration(milliseconds: 300));   // gentle on the server: chat and calls stay quick
         }
       }
     } catch (e) {
@@ -223,6 +241,14 @@ class BackupService {
       });
     }
     _ping();
+  }
+
+  /// the server asked us to slow down: wait as long as it says (Retry-After), then go on
+  static Future<void> _serverBusy(ApiRes r) async {
+    final secs = (int.tryParse(r.headers['retry-after'] ?? '') ?? 20).clamp(5, 60).toInt();
+    now = 'Server busy, going on in $secs s';
+    _ping();
+    await Future.delayed(Duration(seconds: secs));
   }
 }
 
